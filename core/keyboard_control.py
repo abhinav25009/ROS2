@@ -167,9 +167,12 @@ class KeyboardDroneController(Node):
 
         # Room boundaries (NED) — prevent flying outside the room
         # X: -5 to +5, Y: -4 to +4, Z: 0 to -3 (remember NED: negative Z = up)
-        self.X_MIN, self.X_MAX = -4.5, 4.5     # Leave 0.5m margin from walls
-        self.Y_MIN, self.Y_MAX = -3.5, 3.5
-        self.Z_MIN, self.Z_MAX = -2.8, -0.5    # Min altitude 0.5m, max 2.8m
+        # house_2floor: interior x -7..7, y -5..5, ground floor 0-2.8 m,
+        # first floor 3.0 m up to a roof at 5.4-7.0 m, garden out to x=14.
+        # NED: Z_MIN is the HIGHEST altitude (most negative).
+        self.X_MIN, self.X_MAX = -6.5, 13.0    # house + garden
+        self.Y_MIN, self.Y_MAX = -4.5, 4.5
+        self.Z_MIN, self.Z_MAX = -5.2, -0.5    # 0.5 m up to 5.2 m
 
         # ── Main loop timer (10 Hz) ──
         # This handles BOTH the heartbeat AND keyboard reading
