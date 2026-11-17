@@ -9,10 +9,10 @@ randomly sampled but reproducible start/goal pairs.
 
 PLANNERS (all share one MultiLayerPlanner construction per world)
     stock     MultiLayerPlanner.plan - the "before"
-    ahppa     PortfolioPlanner.plan, clearance band +/-1.0 m (as deployed)
-    ahppa_h   same, clearance band +/-0.3 m: ablation that ignores floors and
-              ceilings, testing whether the ceiling bias is what holds AHPPA
-              back (report 2026-11-17, finding 1)
+    ahppa     PortfolioPlanner.plan, clearance band +/-1.0 m - the version
+              deployed on 2026-11-17 (explicit, so old results reproduce)
+    ahppa_h   same, clearance band +/-0.3 m. This is the DEFAULT since the
+              ceiling fix (clearance_feature.BAND_Z_DEFAULT), i.e. what ships
 
 WORLD PREPARATION
     The collection is built for ground robots: walls are 2.0 m tall, so a
@@ -79,10 +79,25 @@ def _pose(el):
     return (v + [0.0] * 6)[:6]
 
 
-def load_boxes(path):
-    """World-frame AABBs (yaw-only, as all these worlds are) of every box and
-    cylinder collision."""
-    out = []
+def _rot(rpy):
+    r, p, y = rpy
+    cr, sr, cp, sp, cy, sy = (math.cos(r), math.sin(r), math.cos(p), math.sin(p),
+                              math.cos(y), math.sin(y))
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
+
+
+def load_geometry(path):
+    """(upright AABBs, surface points of TILTED shapes).
+
+    SDF poses compose model -> link -> collision with full roll/pitch/yaw.
+    Shapes with no roll or pitch become world-frame AABBs (exact for yaw too,
+    via the rotated extent). Tilted ones - e.g. house_2floor's roof, pitched
+    12.6 deg - cannot be an AABB without turning a thin slope into a solid
+    block, so their surfaces are sampled at RES/2 and voxelised directly.
+    Before 2026-11-17 this loader was yaw-only and treated that roof as flat."""
+    out, tilted = [], []
     for m in ET.parse(path).getroot().iter('model'):
         mp = _pose(m)
         for link in m.findall('link') or [m]:
@@ -100,15 +115,38 @@ def load_boxes(path):
                 else:
                     continue
                 cp = _pose(col)
-                x = y = z = yaw = 0.0
+                R, t = np.eye(3), np.zeros(3)
                 for p in (mp, lp, cp):
-                    c, s = math.cos(yaw), math.sin(yaw)
-                    x, y, z = x + c * p[0] - s * p[1], y + s * p[0] + c * p[1], z + p[2]
-                    yaw += p[5]
-                c, s = abs(math.cos(yaw)), abs(math.sin(yaw))
-                hx, hy = (c * sx + s * sy) / 2, (s * sx + c * sy) / 2
-                out.append([x - hx, x + hx, y - hy, y + hy, z - sz / 2, z + sz / 2])
-    return np.array(out, dtype=float)
+                    t = t + R @ np.array(p[:3])
+                    R = R @ _rot(p[3:6])
+                h = np.array([sx, sy, sz]) / 2
+                if abs(R[2, 2]) > 1 - 1e-6:            # upright: AABB is exact
+                    e = np.abs(R) @ h
+                    out.append([t[0] - e[0], t[0] + e[0], t[1] - e[1], t[1] + e[1],
+                                t[2] - e[2], t[2] + e[2]])
+                else:
+                    tilted.append(_box_surface(t, R, h))
+    pts = np.concatenate(tilted) if tilted else np.empty((0, 3))
+    return np.array(out, dtype=float), pts
+
+
+def _box_surface(t, R, h):
+    step = RES / 2
+    g = [np.linspace(-hi, hi, max(2, int(math.ceil(2 * hi / step)) + 1)) for hi in h]
+    faces = []
+    for ax in range(3):
+        o = [i for i in range(3) if i != ax]
+        a, b = np.meshgrid(g[o[0]], g[o[1]], indexing='ij')
+        for sgn in (-1, 1):
+            f = np.zeros((a.size, 3))
+            f[:, o[0]], f[:, o[1]], f[:, ax] = a.ravel(), b.ravel(), sgn * h[ax]
+            faces.append(f)
+    return np.concatenate(faces) @ R.T + t
+
+
+def load_boxes(path):
+    """Upright shapes only, as world-frame AABBs (kept for old callers)."""
+    return load_geometry(path)[0]
 
 
 def prepare(boxes, indoor):
@@ -118,16 +156,23 @@ def prepare(boxes, indoor):
     xs = (b[:, 0].min(), b[:, 1].max())
     ys = (b[:, 2].min(), b[:, 3].max())
     if indoor:
+        # AHPPA_BENCH_CEILING moves the ceiling for the sensitivity test
+        # (default 2.8 m, as in house_2floor).
+        ceil = float(os.environ.get('AHPPA_BENCH_CEILING', '2.8'))
         tall = b[:, 5] >= 1.9
-        b[tall, 5] = np.maximum(b[tall, 5], 2.8)
-        b = np.vstack([b, [[xs[0], xs[1], ys[0], ys[1], 2.8, 3.0]]])
+        b[tall, 5] = np.maximum(b[tall, 5], ceil)
+        b = np.vstack([b, [[xs[0], xs[1], ys[0], ys[1], ceil, ceil + 0.2]]])
     b[:, 5] = np.minimum(b[:, 5], Z_CAP)
     return b[b[:, 5] > b[:, 4]], xs, ys
 
 
-def shell_voxels(boxes):
-    """Occupied voxel centres on the surface of each box (0.10 m)."""
+def shell_voxels(boxes, extra_points=None):
+    """Occupied voxel centres on the surface of each box (0.10 m), plus the
+    voxels hit by extra_points (surfaces of tilted shapes)."""
     keys = []
+    if extra_points is not None and len(extra_points):
+        ep = extra_points[(extra_points[:, 2] >= 0.15) & (extra_points[:, 2] <= Z_CAP)]
+        keys.append(np.floor(ep / RES).astype(np.int64))
     for x0, x1, y0, y1, z0, z1 in boxes:
         ix = np.arange(math.floor(x0 / RES), max(math.ceil(x1 / RES), math.floor(x0 / RES) + 1))
         iy = np.arange(math.floor(y0 / RES), max(math.ceil(y1 / RES), math.floor(y0 / RES) + 1))
@@ -302,7 +347,7 @@ def main():
     ap.add_argument('--out', default=os.path.join(REPO, 'benchmark', 'ahppa_multiworld_results.csv'))
     a = ap.parse_args()
 
-    feat_deployed = ClearanceEstimator()
+    feat_deployed = ClearanceEstimator(band_z=1.0)   # the 2026-11-17 version
     feat_h = ClearanceEstimator(band_z=0.3)
     P.set_clock(lambda: 0.0)
 
@@ -325,8 +370,9 @@ def main():
             print(f"skip {name} (already in {a.out})")
             continue
         t0 = time.time()
-        boxes, xs, ys = prepare(load_boxes(path), indoor)
-        centers = shell_voxels(boxes)
+        upright, tilted = load_geometry(path)
+        boxes, xs, ys = prepare(upright, indoor)
+        centers = shell_voxels(boxes, tilted)
         grid, octo = make_inputs(centers, xs, ys)
         with contextlib.redirect_stdout(io.StringIO()):
             port = P.PortfolioPlanner(grid, octo, safety_margin=SAFETY_MARGIN,
