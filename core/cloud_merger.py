@@ -60,11 +60,23 @@ class CloudMerger(Node):
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('publish_rate', 5.0)
         self.declare_parameter('max_age_sec', 2.0)
+        # Self-filter: the right/rear cameras see the drone's own propellers
+        # 0.20-0.32 m away. Merged into base_link they sit ~0.28 m above the
+        # body, pass octomap's 0.3 m min_range test (it measures from the
+        # base_link origin) and get mapped as an obstacle that follows the
+        # drone - local clearance then reads ~0.3 m everywhere and AHPPA
+        # dispatches DENSE in an open hall (flight 2026-11-17). Drop every
+        # point within this radius of base_link. 0.5 m clears the rotor tips
+        # (~0.38 m) with margin; anything that close is already inside the
+        # planner's safety margin and was mapped from further away.
+        self.declare_parameter('self_filter_radius', 0.5)
 
         self.inputs = list(self.get_parameter('input_topics').value)
         self.target = self.get_parameter('target_frame').value
         self.voxel = float(self.get_parameter('voxel_size').value)
         self.max_age = float(self.get_parameter('max_age_sec').value)
+        self.self_r = float(self.get_parameter('self_filter_radius').value)
+        self.self_dropped = 0
         out = self.get_parameter('output_topic').value
         rate = float(self.get_parameter('publish_rate').value)
 
@@ -85,7 +97,8 @@ class CloudMerger(Node):
         print(f'\n  Cloud merger  ->  {out}  (frame: {self.target})')
         for t in self.inputs:
             print(f'     in: {t}')
-        print(f'     voxel {self.voxel} m, {rate} Hz\n')
+        print(f'     voxel {self.voxel} m, {rate} Hz, '
+              f'self-filter r={self.self_r} m\n')
 
     def merge(self):
         now = self.get_clock().now()
@@ -122,6 +135,10 @@ class CloudMerger(Node):
 
         pts = np.concatenate(chunks, 0)
         pts = pts[np.isfinite(pts).all(1)]
+        if self.self_r > 0 and self.target == 'base_link':
+            keep = np.einsum('ij,ij->i', pts, pts) >= self.self_r ** 2
+            self.self_dropped = int((~keep).sum())
+            pts = pts[keep]
         raw = pts.shape[0]
 
         if self.voxel > 0 and raw:
@@ -133,7 +150,8 @@ class CloudMerger(Node):
         self.n += 1
         if self.n % 25 == 0:
             print(f'  {used}/{len(self.inputs)} clouds | '
-                  f'{raw} -> {pts.shape[0]} pts after voxel')
+                  f'{raw} -> {pts.shape[0]} pts after voxel | '
+                  f'self-filter dropped {self.self_dropped}')
 
     def publish(self, pts, stamp):
         m = PointCloud2()

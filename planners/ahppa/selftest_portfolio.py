@@ -121,6 +121,17 @@ P.DISPATCH.update(0.99, now=P.CLOCK())
 check("switch allowed after 1.1 s of sim time", P.DISPATCH.mode != mode0,
       P.DISPATCH.mode)
 
+print("\n-- first decision --")
+from dispatcher import HysteresisDispatcher, DENSE, MEDIUM   # noqa: E402
+for tight, want in ((0.90, DENSE), (0.50, MEDIUM), (0.10, OPEN)):
+    d = HysteresisDispatcher()
+    got = d.update(tight, now=5.0)
+    check(f"first update at tightness {tight:.2f} -> {want}",
+          got == want and d.switches == 0, got)
+d = HysteresisDispatcher()
+check("first update with deadlock -> ESCAPE",
+      d.update(0.1, deadlock=True, now=5.0) == ESCAPE)
+
 print("\n-- persistent log --")
 files = glob.glob(os.path.join(LOGDIR, 'portfolio_*.csv'))
 check("one CSV created", len(files) == 1, LOGDIR)
