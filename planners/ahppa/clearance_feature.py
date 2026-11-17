@@ -25,6 +25,24 @@ WHAT THE DISPATCHER SEES
     With c_open = 1.5 m:  1.5 m -> 0.00   1.0 m -> 0.33
                           0.5 m -> 0.67   0.0 m -> 1.00
 
+VERTICAL BAND: +/-0.3 m, NOT +/-1.0 m (changed 2026-11-17)
+    Only voxels within band_z of the drone's altitude count. The original
+    +/-1.0 m band reached 2.8 m from the 1.8 m flight layer - exactly where a
+    normal ceiling is - so indoors the nearest "obstacle" was the ceiling and
+    the reading sat at 0.95 m, 5 mm under the OPEN threshold. In the 44-layout
+    benchmark (docs/AHPPA_detailed_report.pdf) that pinned AHPPA to MEDIUM on
+    1,109 of 1,110 indoor queries; raising the ceiling 10 cm flipped 76 of
+    120 to OPEN. Under a SLOPING ceiling (house_2floor's roof is pitched
+    12.6 deg) the reading would change continuously along the slope, so the
+    mode would depend on where under the roof the drone is, not on the walls.
+
+    +/-0.3 m is the planner's own collision band (DRONE_CLEARANCE in
+    planner_3d.py): an obstacle outside it cannot block the current layer,
+    so it should not decide the mode either. A ceiling or roof slope that
+    comes within 0.3 m of the flight altitude still counts - there it is a
+    genuine obstacle at flight height. Benchmark with the 0.3 m band:
+    2.8% shorter paths, 59% fewer waypoints, no clearance loss.
+
 LIMITATION, STATED PLAINLY
     Clearance comes from OctoMap's occupied voxels, which exist only where
     the drone has already seen something, so unobserved space reads as wide
@@ -34,12 +52,13 @@ LIMITATION, STATED PLAINLY
 import numpy as np
 
 C_OPEN_DEFAULT = 1.5          # metres; clearance at or above this is "open"
+BAND_Z_DEFAULT = 0.3          # metres; = planner_3d.DRONE_CLEARANCE (see above)
 
 
 class ClearanceEstimator:
     """Distance from the drone to the nearest occupied voxel in its band."""
 
-    def __init__(self, band_z=1.0, max_range=5.0, c_open=C_OPEN_DEFAULT):
+    def __init__(self, band_z=BAND_Z_DEFAULT, max_range=5.0, c_open=C_OPEN_DEFAULT):
         self.band_z = float(band_z)
         self.max_range = float(max_range)
         self.c_open = float(c_open)
