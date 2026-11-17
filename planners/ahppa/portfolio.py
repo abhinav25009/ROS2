@@ -23,17 +23,34 @@ CLOCK
     make it exact - mixing wall and sim time has caused three separate bugs
     in this project already.
 
+DEADLOCK -> ESCAPE (wired 2026-11-17)
+    Before this, nothing in the live stack ever passed deadlock= to the
+    dispatcher, so ESCAPE was reachable only in the offline selftest. Now the
+    navigator calls observe() every control tick; it feeds a module-level
+    DeadlockWatchdog on the installed (sim) clock. While the watchdog is
+    tripped, every plan() is dispatched in ESCAPE. The navigator triggers one
+    replan on each new trip (see deadlock_edge()).
+
+LOG
+    Every portfolio plan() appends a row to logs/ahppa/portfolio_<stamp>.csv
+    in the repo - NOT /tmp, which the VM wipes on reboot (the October flight
+    CSVs were lost that way). Override the directory with AHPPA_LOG_DIR.
+
 USE
     export AHPPA_PORTFOLIO=1     # off unless set
 """
+import csv
+import datetime
 import os
 import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.expanduser("~/Desktop/Drone_IP"))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, REPO_ROOT)
 
 from planners.planner_3d import MultiLayerPlanner, Z_LAYERS   # noqa: E402
 from clearance_feature import ClearanceEstimator              # noqa: E402
@@ -41,23 +58,81 @@ from dispatcher import (HysteresisDispatcher, OPEN, MEDIUM,   # noqa: E402
                         DENSE, ESCAPE)
 from lazy_theta import LazyThetaStar                          # noqa: E402
 from clearance_astar import ClearanceAStar                    # noqa: E402
+from watchdog import DeadlockWatchdog                         # noqa: E402
 
 # -- vehicle-level state, deliberately not per planner instance ------------
 FEATURE = ClearanceEstimator()
 DISPATCH = HysteresisDispatcher()
+# 30 samples at 0.2 s = a 6 s window of SIM time. The navigator's control
+# loop runs at 20 Hz; feeding every tick would make the window 1.5 s, short
+# enough to trip during an ordinary hover-turn at a waypoint.
+WATCHDOG = DeadlockWatchdog(samples=30, min_displacement=0.30, rearm_s=5.0)
+WATCHDOG_PERIOD_S = 0.2
 CLOCK = time.monotonic
+CLOCK_IS_SIM = False
 STATS = {OPEN: 0, MEDIUM: 0, DENSE: 0, ESCAPE: 0}
+
+_last_obs_t = None
+_seen_trips = 0
+_log_path = None
 
 
 def set_clock(fn):
     """Install the node's sim-time source: set_clock(lambda: node.get_clock()
     .now().nanoseconds / 1e9)."""
-    global CLOCK
+    global CLOCK, CLOCK_IS_SIM
     CLOCK = fn
+    CLOCK_IS_SIM = True
 
 
 def enabled():
     return os.environ.get('AHPPA_PORTFOLIO', '0') not in ('0', '', 'false')
+
+
+def observe(x, y, z, goal_active):
+    """Feed one pose to the deadlock watchdog. Call every control tick; it
+    down-samples to WATCHDOG_PERIOD_S itself. Returns True while deadlocked."""
+    global _last_obs_t
+    t = CLOCK()
+    if not goal_active:
+        WATCHDOG.update(x, y, z, t, goal_active=False)
+        _last_obs_t = None
+        return False
+    # 1 ms slack: four 50 ms ticks sum to 0.19999... in floating point, which
+    # would otherwise stretch every sample to five ticks and the window to 7.5 s
+    if _last_obs_t is not None and t - _last_obs_t < WATCHDOG_PERIOD_S - 1e-3:
+        return WATCHDOG.tripped
+    _last_obs_t = t
+    return WATCHDOG.update(x, y, z, t, goal_active=True)
+
+
+def deadlock_edge():
+    """True exactly once per new watchdog trip, so the caller replans once
+    per deadlock rather than every tick while it lasts."""
+    global _seen_trips
+    if WATCHDOG.trips > _seen_trips:
+        _seen_trips = WATCHDOG.trips
+        return True
+    return False
+
+
+def _log(row):
+    """Append one plan record to the persistent CSV. Never raises."""
+    global _log_path
+    try:
+        if _log_path is None:
+            d = os.environ.get('AHPPA_LOG_DIR',
+                               os.path.join(REPO_ROOT, 'logs', 'ahppa'))
+            os.makedirs(d, exist_ok=True)
+            stamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            _log_path = os.path.join(d, f'portfolio_{stamp}.csv')
+            with open(_log_path, 'w', newline='') as f:
+                csv.writer(f).writerow(list(row))
+            print(f"  [portfolio] logging plans -> {_log_path}")
+        with open(_log_path, 'a', newline='') as f:
+            csv.writer(f).writerow(list(row.values()))
+    except Exception as e:                          # logging must never
+        print(f"  [portfolio] log write failed: {e}")  # take down a plan
 
 
 class PortfolioPlanner(MultiLayerPlanner):
@@ -80,8 +155,9 @@ class PortfolioPlanner(MultiLayerPlanner):
         #   update(density, deadlock=False, now=None)
         # so passing the clock positionally made every query report a
         # deadlock (any non-zero float is truthy) and forced ESCAPE on
-        # all 23 plans of the 2026-10-25 flight.
-        return DISPATCH.update(t, now=CLOCK()), t
+        # all 23 plans of the 2026-10-25 flight. deadlock= is now the
+        # watchdog's real state, fed by observe().
+        return DISPATCH.update(t, deadlock=WATCHDOG.tripped, now=CLOCK()), t
 
     def plan(self, sx, sy, gx, gy, start_layer=None, goal_layer=None):
         if not enabled():
@@ -91,6 +167,7 @@ class PortfolioPlanner(MultiLayerPlanner):
         sl = max(0, min(L - 1, sl))
         gl = sl if goal_layer is None else int(goal_layer)
         gl = max(0, min(L - 1, gl))
+        deadlock = bool(WATCHDOG.tripped)
         try:
             mode, tight = self._mode_for(sx, sy, sl)
         except Exception:
@@ -100,26 +177,41 @@ class PortfolioPlanner(MultiLayerPlanner):
 
         start = (sx, sy, Z_LAYERS[sl])
         goal = (gx, gy, Z_LAYERS[gl])
+        t0 = time.perf_counter()
+        p, used, err = None, mode, ''
         try:
-            p = None
             if mode == OPEN:
                 p = self._lt.plan(self._grids, start, goal)
             elif mode in (DENSE, ESCAPE):
                 p = self._ca.plan(self._grids, start, goal)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            print(f"    [portfolio] {mode} failed ({err}), "
+                  f"falling back to grid A*")
+            p = None
+        else:
             if p:
                 print(f"    [portfolio] {mode}  clearance "
                       f"{FEATURE.last_clearance:.2f} m  tight {tight:.2f}  "
                       f"{len(p)} waypoints   {dict(STATS)}")
-                return p
-        except Exception as e:
-            print(f"    [portfolio] {mode} failed ({type(e).__name__}: {e}), "
-                  f"falling back to grid A*")
-        else:
-            if mode != MEDIUM:
+            elif mode != MEDIUM:
                 # Never fall through silently: without this the log shows only
                 # the stock planner's message and the portfolio looks inactive.
                 print(f"    [portfolio] {mode} returned NO PATH "
                       f"(clearance {FEATURE.last_clearance:.2f} m, "
                       f"tight {tight:.2f}) -> stock A*")
-        # MEDIUM is the stock planner, and so is every fallback path
-        return super().plan(sx, sy, gx, gy, start_layer, goal_layer)
+        if not p:
+            # MEDIUM is the stock planner, and so is every fallback path
+            used = MEDIUM if mode == MEDIUM else f"{mode}->A*"
+            p = super().plan(sx, sy, gx, gy, start_layer, goal_layer)
+        ms = (time.perf_counter() - t0) * 1000.0
+
+        _log(dict(t=round(CLOCK(), 3), sim_clock=int(CLOCK_IS_SIM), mode=mode,
+                  planner=used, deadlock=int(deadlock),
+                  clearance=round(float(FEATURE.last_clearance), 3),
+                  tightness=round(float(tight), 4),
+                  sx=round(sx, 2), sy=round(sy, 2), s_layer=sl,
+                  gx=round(gx, 2), gy=round(gy, 2), g_layer=gl,
+                  ms=round(ms, 2), n=len(p) if p else 0, ok=int(bool(p)),
+                  error=err))
+        return p

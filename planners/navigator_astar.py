@@ -68,7 +68,10 @@ if _os.environ.get('AHPPA_PORTFOLIO', '0') not in ('0', '', 'false'):
     _sys.path.insert(0, _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)), 'ahppa'))
     from portfolio import PortfolioPlanner as MultiLayerPlanner
+    import portfolio as _ahppa
     print('  [portfolio] AHPPA planner portfolio ACTIVE')
+else:
+    _ahppa = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -680,9 +683,15 @@ class AutonomousNavigator(Node):
             depth=5
         )
 
+        # World name selects the Gazebo pose topic. launch_sim.sh bridges
+        # house_3room, launch_sim_360.sh bridges house_2floor:
+        #   --ros-args -p world:=house_3room
+        self.declare_parameter('world', 'house_2floor')
+        world = str(self.get_parameter('world').value)
+
         # ── Subscribers ──
         self.gz_sub = self.create_subscription(
-            TFMessage, '/world/house_2floor/dynamic_pose/info',
+            TFMessage, f'/world/{world}/dynamic_pose/info',
             self.gz_pose_cb, qos)
         self.odom_sub = self.create_subscription(
             VehicleOdometry, '/fmu/out/vehicle_odometry',
@@ -729,6 +738,7 @@ class AutonomousNavigator(Node):
         self.waypoints = []      # Current path waypoints: [(x,y,z), ...]
         self.wp_idx = 0
         self.goal_xy = None      # Store goal for replanning
+        self.goal_layer = None   # ...and its layer, so a replan stays on the right floor
         self.current_alt = 1.8   # Current target altitude (smoothed)
 
         # Frontier exploration state
@@ -754,7 +764,7 @@ class AutonomousNavigator(Node):
         self.retreat_target = None          # (px4_x, px4_y) to retreat to
         self.retreat_start_time = 0.0       # When retreat started
         self.RETREAT_DURATION = 2.0         # Seconds to hold retreat position
-        self.last_position_time = time.monotonic()  # For stuck detection
+        self.last_position_time = self._now()  # For stuck detection (sim time)
         self.last_position_xy = None        # Last recorded position (Gazebo ENU)
         self.STUCK_TIME_LIMIT = 40.0
         self.STUCK_MOVE_THRESHOLD = 0.15
@@ -780,6 +790,12 @@ class AutonomousNavigator(Node):
         # Obstacle avoidance: check path every N ticks
         self.AVOIDANCE_CHECK_INTERVAL = 40  # Check every 40 ticks (2 seconds at 20Hz)
         self.avoidance_tick = 0
+
+        # ── AHPPA: dwell + deadlock timing on SIM time, same as the rest ──
+        if _ahppa is not None:
+            _ahppa.set_clock(self._now)
+            print(f"  [portfolio] clock: "
+                  f"{'sim' if self._uses_sim_time() else 'WALL (use_sim_time is false)'}")
 
         # ── Control timer: 20 Hz ──
         self.create_timer(0.05, self.control_loop)
@@ -852,6 +868,7 @@ class AutonomousNavigator(Node):
 
         gx = msg.pose.position.x
         gy = msg.pose.position.y
+        g_layer = None
 
         print(f"\n🎯  Goal received: ({gx:.2f}, {gy:.2f})")
         print(f"   Drone is at: ({self.gz_pos[0]:.2f}, {self.gz_pos[1]:.2f}, z={self.gz_pos[2]:.2f})")
@@ -889,6 +906,7 @@ class AutonomousNavigator(Node):
             self.waypoints = path
             self.wp_idx = 0
             self.goal_xy = (gx, gy)
+            self.goal_layer = g_layer if self.octomap_3d.is_ready else None
             self._set_state('NAVIGATING')
             self._publish_rviz_path(path)
             # Count altitude changes
@@ -899,6 +917,21 @@ class AutonomousNavigator(Node):
             print("   ❌ No path found. Try a different target.")
 
     # ── Control Loop ──────────────────────────────────────────────────────────────────
+
+    def _uses_sim_time(self):
+        try:
+            return bool(self.get_parameter('use_sim_time').value)
+        except Exception:
+            return False
+
+    def _now(self):
+        """Seconds on the node clock: SIM time when use_sim_time:=true.
+        Every timer in the navigator goes through this so stuck detection,
+        retreat and frontier throttling all scale with the real-time factor.
+        Before the first /clock message sim time reads 0; fall back to wall
+        time only for that startup window so nothing waits forever."""
+        t = self.get_clock().now().nanoseconds / 1e9
+        return t if t > 0.0 else time.monotonic()
 
     def _set_state(self, new_state):
         """Change navigator state and broadcast it on /nav_state (latched)."""
@@ -922,9 +955,19 @@ class AutonomousNavigator(Node):
             self._explore_step()
 
         elif self.state == 'NAVIGATING':
+            if _ahppa is not None:
+                _ahppa.observe(*self.gz_pos, goal_active=True)
+                if _ahppa.deadlock_edge():
+                    print(f"  🔒 [portfolio] DEADLOCK: moved < "
+                          f"{_ahppa.WATCHDOG.min_disp:.2f} m in "
+                          f"{_ahppa.WATCHDOG.window_s:.1f} s — replanning in ESCAPE")
+                    self._replan()
+                    return
             self._navigate_step()
 
         elif self.state == 'READY':
+            if _ahppa is not None:
+                _ahppa.observe(*self.gz_pos, goal_active=False)
             # Hover in place
             self._send_position(self.px4_pos[0], self.px4_pos[1], -self.ALTITUDE)
 
@@ -958,7 +1001,7 @@ class AutonomousNavigator(Node):
         # ── FINDING: extract frontiers and plan a path ──
         if self.frontier_phase == 'FINDING':
             # Throttle: don't re-extract every tick
-            now = time.monotonic()
+            now = self._now()
             if now - self.last_frontier_time < self.FRONTIER_INTERVAL:
                 # Hover while waiting
                 self._send_position(self.px4_pos[0], self.px4_pos[1], -self.ALTITUDE)
@@ -1025,7 +1068,7 @@ class AutonomousNavigator(Node):
                 print(f"     ✅ Path planned — {len(path)} waypoints. Flying!")
             else:
                 print(f"     ❌ All frontiers unreachable. Skipping tick.")
-                self.last_frontier_time = time.monotonic() - self.FRONTIER_INTERVAL + 1.0
+                self.last_frontier_time = self._now() - self.FRONTIER_INTERVAL + 1.0
             return
 
         # ── FLYING: follow A* path to the frontier centroid ──
@@ -1045,7 +1088,7 @@ class AutonomousNavigator(Node):
                     return
 
             # ── Stuck detection: if drone hasn't moved enough, retreat + new frontier
-            now = time.monotonic()
+            now = self._now()
             if self.last_position_xy is not None:
                 moved = math.hypot(
                     self.gz_pos[0] - self.last_position_xy[0],
@@ -1152,7 +1195,7 @@ class AutonomousNavigator(Node):
 
         # ── RETREATING: back away from danger, then replan ──
         if self.frontier_phase == 'RETREATING':
-            now = time.monotonic()
+            now = self._now()
             if self.retreat_target is not None:
                 # Hold the retreat position for RETREAT_DURATION seconds
                 self._send_position(
@@ -1215,7 +1258,7 @@ class AutonomousNavigator(Node):
             self.retreat_target = (self.px4_pos[0], self.px4_pos[1])
 
         self.frontier_phase = 'RETREATING'
-        self.retreat_start_time = time.monotonic()
+        self.retreat_start_time = self._now()
         self.frontier_target = None
         self.frontier_path = []
 
@@ -1259,6 +1302,7 @@ class AutonomousNavigator(Node):
                 print("  🎉 DESTINATION REACHED! Set a new goal in RViz.")
                 self.waypoints = []
                 self.goal_xy = None
+                self.goal_layer = None
                 self._set_state('READY')
                 return
 
@@ -1373,7 +1417,9 @@ class AutonomousNavigator(Node):
                                             safety_margin=self.SAFETY_MARGIN, unknown_penalty=50.0)
                 # Use standard A* (dense path) instead of Theta* (sparse path)
                 path = planner.plan(self.gz_pos[0], self.gz_pos[1],
-                                    self.goal_xy[0], self.goal_xy[1])
+                                    self.goal_xy[0], self.goal_xy[1],
+                                    start_layer=layer_for_z(self.gz_pos[2]),
+                                    goal_layer=self.goal_layer)
             except Exception:
                 path = None
 
@@ -1394,6 +1440,7 @@ class AutonomousNavigator(Node):
             print("  ❌ Replan failed — hovering. Try a new goal.")
             self.waypoints = []
             self.goal_xy = None
+            self.goal_layer = None
             self._set_state('READY')
 
     # ── Takeoff ───────────────────────────────────────────────────────────────

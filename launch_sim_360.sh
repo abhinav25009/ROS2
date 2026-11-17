@@ -110,7 +110,7 @@ sleep 3
 if [[ "$AUTO" == "true" ]]; then
     echo "[T8] Frontier navigator"
     open_term "T8 - Navigator" \
-      "$SRC_PX4 && python3 $REPO/planners/navigator_astar.py"
+      "$SRC_PX4 && python3 $REPO/planners/navigator_astar.py --ros-args -p use_sim_time:=true -p world:=$WORLD"
 fi
 
 cat <<EOF
