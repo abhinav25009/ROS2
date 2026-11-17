@@ -191,12 +191,12 @@ sleep 2  # Give DDS a moment to start
 # --- Terminal 2: PX4 + Gazebo -------------------------------------------------
 echo "🛩️  [Terminal 2] Starting PX4 SITL + Gazebo ($WORLD_NAME)..."
 open_terminal "T2 — PX4 + Gazebo" \
-    "cd $PX4_DIR && echo '🛩️  Building PX4 and launching Gazebo...' && PX4_GZ_WORLD=$WORLD_NAME make px4_sitl gz_x500_depth"
+    "cd $PX4_DIR && echo '🛩️  Building PX4 and launching Gazebo...' && HEADLESS=1 PX4_GZ_WORLD=$WORLD_NAME make px4_sitl gz_x500_depth"
 
 echo ""
 echo "⏳ Waiting 30 seconds for PX4 + Gazebo to initialize..."
 echo "   (Gazebo takes a while to load the 3D world)"
-sleep 30
+sleep 120
 
 # --- Terminal 3: Controller ---------------------------------------------------
 echo "🎮 [Terminal 3] Starting $CONTROLLER_NAME..."
@@ -210,7 +210,7 @@ sleep 3  # Let controller initialize before starting bridge
 # Without this, your ROS 2 nodes can't see the depth camera data.
 echo "🌉 [Terminal 4] Starting Gazebo → ROS 2 Bridge..."
 open_terminal "T4 — GZ-ROS2 Bridge" \
-    "source /opt/ros/humble/setup.bash && echo '🌉 Bridging Gazebo topics to ROS 2 (depth + RGB + pose)...' && ros2 run ros_gz_bridge parameter_bridge /clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock /depth_camera@sensor_msgs/msg/Image[gz.msgs.Image /depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked /camera@sensor_msgs/msg/Image[gz.msgs.Image /camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo /world/house_3room/dynamic_pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V"
+    "source /opt/ros/humble/setup.bash && source $HOME/gz_ws/install/setup.bash && echo '🌉 Bridging Gazebo topics to ROS 2 (depth + RGB + pose)...' && ros2 run ros_gz_bridge parameter_bridge /clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock /depth_camera@sensor_msgs/msg/Image[gz.msgs.Image /depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked /world/house_3room/dynamic_pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V"
 
 sleep 3  # Let bridge initialize before starting filter
 

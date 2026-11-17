@@ -43,7 +43,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from nav_msgs.msg import OccupancyGrid, Path
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PointStamped
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
@@ -55,7 +55,20 @@ from px4_msgs.msg import (
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.octomap_3d_query import OctoMap3DQuery
-from planners.planner_3d import MultiLayerPlanner, Z_LAYERS, DEFAULT_LAYER
+from planners.planner_3d import (MultiLayerPlanner, Z_LAYERS,
+                                 DEFAULT_LAYER, layer_for_z)
+# [portfolio] override placed AFTER the import it shadows: an unconditional
+# `from planners.planner_3d import MultiLayerPlanner` after this would rebind
+# the name straight back to the stock class, and the log would still claim the
+# portfolio was active. Import the MODULE, not the package: ahppa/__init__.py
+# does `from .ahppa import AHPPA` and ahppa.py imports `dispatcher` bare.
+import os as _os
+import sys as _sys
+if _os.environ.get('AHPPA_PORTFOLIO', '0') not in ('0', '', 'false'):
+    _sys.path.insert(0, _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), 'ahppa'))
+    from portfolio import PortfolioPlanner as MultiLayerPlanner
+    print('  [portfolio] AHPPA planner portfolio ACTIVE')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -669,7 +682,7 @@ class AutonomousNavigator(Node):
 
         # ── Subscribers ──
         self.gz_sub = self.create_subscription(
-            TFMessage, '/world/house_3room/dynamic_pose/info',
+            TFMessage, '/world/house_2floor/dynamic_pose/info',
             self.gz_pose_cb, qos)
         self.odom_sub = self.create_subscription(
             VehicleOdometry, '/fmu/out/vehicle_odometry',
@@ -677,6 +690,11 @@ class AutonomousNavigator(Node):
         self.goal_sub = self.create_subscription(
             PoseStamped, '/goal_pose',
             self.goal_cb, 10)
+        # RViz "Publish Point" raycasts against rendered geometry, so the
+        # click carries a real z — unlike "2D Goal Pose", which is always z=0.
+        self.click_sub = self.create_subscription(
+            PointStamped, '/clicked_point',
+            self.clicked_cb, 10)
         self.map_sub = self.create_subscription(
             OccupancyGrid, '/projected_map',
             self.map_cb, 10)
@@ -720,6 +738,11 @@ class AutonomousNavigator(Node):
         self.frontier_path = []       # A* path to current frontier
         self.frontier_wp_idx = 0      # Index into frontier_path
         self.frontier_scans = 0       # Total 360° scans completed
+        # Frontier exploration is now OPT-IN. Default: take off, hover, and
+        # wait for a clicked goal. Enable with:
+        #   --ros-args -p explore:=true
+        self.declare_parameter('explore', False)
+        self.EXPLORE_ON_START = bool(self.get_parameter('explore').value)
         self.frontier_phase = 'INITIAL_SCAN'  # INITIAL_SCAN → FINDING → FLYING → SCANNING → RETREATING
         self.last_frontier_time = 0.0 # Throttle frontier extraction (expensive)
         self.FRONTIER_INTERVAL = 3.0  # Re-extract frontiers every N seconds
@@ -733,8 +756,8 @@ class AutonomousNavigator(Node):
         self.RETREAT_DURATION = 2.0         # Seconds to hold retreat position
         self.last_position_time = time.monotonic()  # For stuck detection
         self.last_position_xy = None        # Last recorded position (Gazebo ENU)
-        self.STUCK_TIME_LIMIT = 8.0         # If no movement for this long → stuck
-        self.STUCK_MOVE_THRESHOLD = 0.3     # Must move at least this far (metres)
+        self.STUCK_TIME_LIMIT = 40.0
+        self.STUCK_MOVE_THRESHOLD = 0.15
         self.replan_timestamps = []         # Timestamps of recent replans
         self.MAX_REPLANS_WINDOW = 3         # Max replans within REPLAN_WINDOW_SEC
         self.REPLAN_WINDOW_SEC = 10.0       # Window for counting replans
@@ -800,6 +823,19 @@ class AutonomousNavigator(Node):
         """Update the 3D OctoMap query from PointCloud2 voxel centers."""
         self.octomap_3d.update_from_pointcloud2(msg)
 
+    def clicked_cb(self, msg):
+        """RViz Publish Point -> 3D goal. Click a voxel on the floor you want."""
+        ps = PoseStamped()
+        ps.header = msg.header
+        ps.pose.position.x = msg.point.x
+        ps.pose.position.y = msg.point.y
+        ps.pose.position.z = msg.point.z
+        ps.pose.orientation.w = 1.0
+        lyr = layer_for_z(msg.point.z)
+        print(f"\n  3D goal clicked: ({msg.point.x:.2f}, {msg.point.y:.2f}, "
+              f"z={msg.point.z:.2f})  ->  layer {lyr} (z={Z_LAYERS[lyr]:.1f} m)")
+        self.goal_cb(ps)
+
     def goal_cb(self, msg):
         """Handle user clicking '2D Goal Pose' in RViz."""
         if self.state != 'READY':
@@ -829,7 +865,14 @@ class AutonomousNavigator(Node):
                 planner = MultiLayerPlanner(self.occupancy_grid, self.octomap_3d,
                                             safety_margin=self.SAFETY_MARGIN, unknown_penalty=50.0)
                 # Use standard A* (dense path) instead of Theta* (sparse path)
-                path = planner.plan(self.gz_pos[0], self.gz_pos[1], gx, gy)
+                gz = msg.pose.position.z
+                s_layer = layer_for_z(self.gz_pos[2])
+                g_layer = layer_for_z(gz) if gz > 0.3 else None
+                if g_layer is not None:
+                    print(f"   start layer {s_layer} (z={Z_LAYERS[s_layer]:.1f}) "
+                          f"-> goal layer {g_layer} (z={Z_LAYERS[g_layer]:.1f})")
+                path = planner.plan(self.gz_pos[0], self.gz_pos[1], gx, gy,
+                                    start_layer=s_layer, goal_layer=g_layer)
             except Exception as e:
                 print(f"   ⚠️  2.5D planner failed ({e}), falling back to 2D...")
                 path = None
@@ -1380,13 +1423,19 @@ class AutonomousNavigator(Node):
         self._send_command(400, param1=1.0)
         time.sleep(0.5)
 
-        self._set_state('EXPLORING')
         self.frontier_phase = 'INITIAL_SCAN'
         self.scan_rotating = True
         self.scan_yaw = 0.0
         print(f"\n  ✅ Airborne at {self.ALTITUDE}m!")
-        print(f"  🔄 Starting FRONTIER-BASED exploration...")
-        print(f"     Initial 360° scan at spawn to seed OctoMap...\n")
+        if self.EXPLORE_ON_START:
+            self._set_state('EXPLORING')
+            print(f"  🔄 Starting FRONTIER-BASED exploration...")
+            print(f"     Initial 360° scan at spawn to seed OctoMap...\n")
+        else:
+            self._set_state('READY')
+            print(f"  ⏸  Holding position — frontier exploration disabled.")
+            print(f"     Use RViz 'Publish Point' to send a 3D goal.")
+            print(f"     Enable exploring with: --ros-args -p explore:=true\n")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

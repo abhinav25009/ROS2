@@ -46,9 +46,22 @@ from core.octomap_3d_query import OctoMap3DQuery
 # The drone checks that the vertical column at each cell is free
 # from (altitude - clearance_below) to (altitude + clearance_above).
 
-Z_LAYERS = [1.2, 1.8, 2.4]       # metres — low, default, high
+# Two-storey layer stack. The 2.9 m layer sits INSIDE the first-floor slab
+# (2.80-3.00 m): without it, 2.4 m is free downstairs and 3.6 m is free
+# upstairs, so the planner would connect them and fly through concrete.
+# With it, the only cells where 2.4 -> 2.9 -> 3.6 is passable are the atrium
+# and the stairwell — the vertical connectors are DISCOVERED from the map,
+# never hardcoded.
+Z_LAYERS = [1.2, 1.8, 2.4,        # ground floor  (clear 0.00-2.80 m)
+            2.9,                   # slab test layer
+            3.6, 4.2, 4.8, 5.4]    # first floor   (3.00 m up to the roof)
 DRONE_CLEARANCE = 0.3             # metres above and below drone center
 DEFAULT_LAYER = 1                 # index into Z_LAYERS (1.8m)
+
+
+def layer_for_z(z):
+    """Nearest layer index for a world altitude — used for 3D click goals."""
+    return min(range(len(Z_LAYERS)), key=lambda i: abs(Z_LAYERS[i] - z))
 
 # Cost multipliers
 ALTITUDE_CHANGE_COST = 5.0        # Extra cost per layer transition
@@ -113,10 +126,27 @@ class MultiLayerPlanner:
           2. The 3D OctoMap has obstacles in the vertical column at
              that cell's (x,y) within [z_alt - clearance, z_alt + clearance]
         """
-        grid = np.copy(base_grid)
+        # NOTE: deliberately does NOT start from base_grid. /projected_map is a
+        # flatten of the whole column, so on a two-storey building the upstairs
+        # walls would appear as obstacles downstairs and vice versa. Each layer
+        # is built purely from the 3D voxels in its own altitude band.
+        H, W = self.height, self.width
+        pts = getattr(self.octomap_3d, "voxel_centers", None)
+        if not self.octomap_3d.is_ready or pts is None or len(pts) == 0:
+            return np.copy(base_grid)          # no 3D data yet — fall back
 
-        if not self.octomap_3d.is_ready:
-            return grid
+        grid = np.zeros((H, W), dtype=np.uint8)
+        z_min = z_alt - DRONE_CLEARANCE
+        z_max = z_alt + DRONE_CLEARANCE
+
+        band = pts[(pts[:, 2] >= z_min) & (pts[:, 2] <= z_max)]
+        if len(band):
+            c = np.floor((band[:, 0] - self.origin_x) / self.resolution).astype(np.int64)
+            r = np.floor((band[:, 1] - self.origin_y) / self.resolution).astype(np.int64)
+            ok = (r >= 0) & (r < H) & (c >= 0) & (c < W)
+            grid[r[ok], c[ok]] = 1
+
+        return grid
 
         z_min = z_alt - DRONE_CLEARANCE
         z_max = z_alt + DRONE_CLEARANCE
@@ -168,7 +198,8 @@ class MultiLayerPlanner:
 
     def is_free(self, r, c, layer):
         """Check if (r, c) is free on the given layer."""
-        return (0 <= r < self.height and
+        return (0 <= layer < self.num_layers and
+                0 <= r < self.height and
                 0 <= c < self.width and
                 self.layer_grids[layer][r, c] == 0)
 
@@ -245,6 +276,13 @@ class MultiLayerPlanner:
             for dr, dc in h_dirs:
                 nr, nc = cr + dr, cc + dc
                 if not self.is_free(nr, nc, cl):
+                    continue
+                # A diagonal step is only legal when BOTH orthogonal cells
+                # beside it are free. Without this the path squeezes through
+                # the zero-width corner shared by two diagonally placed
+                # obstacles - geometry the drone cannot actually fly.
+                if dr and dc and not (self.is_free(cr + dr, cc, cl)
+                                      and self.is_free(cr, cc + dc, cl)):
                     continue
 
                 penalty = self.unknown_penalty if self.raw[nr, nc] == -1 else 0.0
@@ -366,6 +404,13 @@ class MultiLayerPlanner:
             for dr, dc in h_dirs:
                 nr, nc = cr + dr, cc + dc
                 if not self.is_free(nr, nc, cl):
+                    continue
+                # A diagonal step is only legal when BOTH orthogonal cells
+                # beside it are free. Without this the path squeezes through
+                # the zero-width corner shared by two diagonally placed
+                # obstacles - geometry the drone cannot actually fly.
+                if dr and dc and not (self.is_free(cr + dr, cc, cl)
+                                      and self.is_free(cr, cc + dc, cl)):
                     continue
 
                 nxt = (nr, nc, cl)
