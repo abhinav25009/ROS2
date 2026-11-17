@@ -132,6 +132,33 @@ d = HysteresisDispatcher()
 check("first update with deadlock -> ESCAPE",
       d.update(0.1, deadlock=True, now=5.0) == ESCAPE)
 
+print("\n-- sloping ceiling --")
+# A roof pitched 12.6 deg (as house_2floor's): z = 7.0 - 0.2235 * x, x in
+# [0, 7]. Walls 3 m away on both sides at the flight altitude. With the
+# default band the reading must come from the walls and NOT change as the
+# drone flies under the slope - until the roof itself enters the band.
+from clearance_feature import ClearanceEstimator, BAND_Z_DEFAULT  # noqa: E402
+xs_ = np.arange(0.0, 7.01, 0.1)
+roof = np.array([[x, y, 7.0 - 0.2235 * x] for x in xs_ for y in np.arange(-4, 4.01, 0.1)],
+                dtype=np.float32)
+walls = np.array([[x, y, z] for x in xs_ for y in (-3.0, 3.0) for z in np.arange(0.2, 7.0, 0.1)],
+                 dtype=np.float32)
+vox = np.concatenate([roof, walls])
+dflt, old = ClearanceEstimator(), ClearanceEstimator(band_z=1.0)
+check("default band is the planner's +/-0.3 m", abs(BAND_Z_DEFAULT - 0.3) < 1e-9 and dflt.band_z == 0.3)
+at42 = [dflt.clearance(vox, (x, 0.0, 4.2)) for x in (1.0, 3.0, 5.0, 6.5)]
+check("4.2 m under the slope: reading = wall distance everywhere",
+      max(at42) - min(at42) < 0.05 and abs(at42[0] - 3.0) < 0.1,
+      " ".join(f"{c:.2f}" for c in at42))
+at48_old = [old.clearance(vox, (x, 0.0, 4.8)) for x in (1.0, 3.0, 5.0, 6.5)]
+check("old +/-1.0 m band at 4.8 m: reading drifts along the slope",
+      max(at48_old) - min(at48_old) > 1.0, " ".join(f"{c:.2f}" for c in at48_old))
+at48 = [dflt.clearance(vox, (x, 0.0, 4.8)) for x in (1.0, 3.0, 5.0, 6.5)]
+check("default band at 4.8 m: steady at wall distance",
+      max(at48) - min(at48) < 0.05, " ".join(f"{c:.2f}" for c in at48))
+eave = dflt.clearance(vox, (6.5, 0.0, 5.4))     # roof at 5.55 m, 0.15 m above
+check("roof within 0.3 m of the drone (eaves, 5.4 m) still counts", eave < 0.3, f"{eave:.2f}")
+
 print("\n-- persistent log --")
 files = glob.glob(os.path.join(LOGDIR, 'portfolio_*.csv'))
 check("one CSV created", len(files) == 1, LOGDIR)
