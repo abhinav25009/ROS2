@@ -58,7 +58,13 @@ class HysteresisDispatcher:
         """Return the mode to plan in. ESCAPE overrides density entirely."""
         now = time.monotonic() if now is None else now
         if self._since is None:
+            # First call: classify from scratch. Without this the min-dwell
+            # check (now - _since == 0) pinned the first plan of every flight
+            # to the constructor default OPEN - on 2026-11-17 it planned OPEN
+            # at tightness 0.90. Not counted as a switch: nothing was left.
             self._since = self._last_t = now
+            self.mode = ESCAPE if deadlock else self._from_scratch(density)
+            return self.mode
 
         if deadlock:
             self._switch(ESCAPE, now)
