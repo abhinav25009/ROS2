@@ -5,7 +5,10 @@ measurement rather than inherited constants.
 Fly the drone around the house while this runs, then Ctrl+C for the histogram.
 
   python3 density_logger.py --ros-args -p use_sim_time:=true
-  python3 density_logger.py --ros-args -p out:=/tmp/density_2floor.csv
+  python3 density_logger.py --ros-args -p out:=/path/to/density_2floor.csv
+
+Default output is logs/ahppa/density_<stamp>.csv in the repo, NOT /tmp:
+the VM clears /tmp on reboot, which is how the October CSVs were lost.
 """
 import csv, os, sys
 import numpy as np
@@ -25,12 +28,18 @@ from core.octomap_3d_query import OctoMap3DQuery           # noqa: E402
 class DensityLogger(Node):
     def __init__(self):
         super().__init__('density_logger')
-        self.declare_parameter('out', '/tmp/density_log.csv')
+        import datetime
+        _repo = os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))
+        _stamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        self.declare_parameter('out', os.path.join(
+            _repo, 'logs', 'ahppa', f'density_{_stamp}.csv'))
         self.declare_parameter('window_xy', 15.0)
         self.declare_parameter('band_z', 1.0)
         self.declare_parameter('world', 'house_2floor')
 
         self.path = self.get_parameter('out').value
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         self.est = DensityEstimator(
             window_xy=float(self.get_parameter('window_xy').value),
             band_z=float(self.get_parameter('band_z').value))
