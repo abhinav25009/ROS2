@@ -49,6 +49,21 @@ class OctoMap3DQuery:
         self._last_stamp = None       # Avoid rebuilding on duplicate msgs
         self.REBUILD_INTERVAL = 2.0   # Min seconds (msg stamp) between rebuilds
         self._last_rebuild_time = None
+        # Occupancy memory for THIN obstacles (added 2026-11-17). OctoMap
+        # clears a voxel when rays pass through it; a 5 cm railing post fills
+        # half a 0.10 m voxel, so rays through the gaps erase it. In flight
+        # the atrium posts were mapped (a plan climbed over them) and 21 s
+        # later gone (a plan went through them, and the drone crashed). A
+        # voxel seen occupied in >= MEMORY_MIN_HITS rebuilds stays occupied
+        # until MEMORY_TTL seconds after it was last seen. Moved obstacles
+        # therefore linger for up to MEMORY_TTL - conservative, never unsafe.
+        # MEMORY_TTL = 0 disables it.
+        self.MEMORY_TTL = 60.0
+        self.MEMORY_MIN_HITS = 2
+        self._mem_codes = np.empty(0, np.int64)
+        self._mem_hits = np.empty(0, np.int32)
+        self._mem_last = np.empty(0, np.float64)
+        self.remembered_only = 0      # voxels kept only by memory (last rebuild)
 
     # ── Data Ingestion ────────────────────────────────────────────────────
 
@@ -92,11 +107,48 @@ class OctoMap3DQuery:
             self.occupied_set = set()
             return
 
-        self.voxel_centers = points
-
-        # Build the hash set of occupied voxel keys (vectorized)
         keys = np.floor(points / self.resolution).astype(np.int64)
+        keys = self._apply_memory(keys, t)
+        self.voxel_centers = ((keys.astype(np.float64) + 0.5) * self.resolution).astype(np.float32)
         self.occupied_set = set(map(tuple, keys.tolist()))
+
+    # ── Occupancy memory ──────────────────────────────────────────────────
+
+    _OFF = 1 << 20
+
+    @classmethod
+    def _encode(cls, keys):
+        k = keys + cls._OFF
+        return (k[:, 0] << 42) | (k[:, 1] << 21) | k[:, 2]
+
+    @classmethod
+    def _decode(cls, codes):
+        m = (1 << 21) - 1
+        return np.stack([(codes >> 42) & m, (codes >> 21) & m, codes & m], 1) - cls._OFF
+
+    def _apply_memory(self, keys, t):
+        """Merge this rebuild's voxel keys with remembered ones; returns keys."""
+        if self.MEMORY_TTL <= 0:
+            return keys
+        cur = np.unique(self._encode(keys))
+        if len(self._mem_last) and t < self._mem_last.max() - 1.0:
+            self._mem_codes = np.empty(0, np.int64)       # clock went back: reset
+            self._mem_hits = np.empty(0, np.int32)
+            self._mem_last = np.empty(0, np.float64)
+        allc = np.union1d(self._mem_codes, cur)
+        hits = np.zeros(len(allc), np.int32)
+        last = np.full(len(allc), -np.inf)
+        i = np.searchsorted(allc, self._mem_codes)
+        hits[i], last[i] = self._mem_hits, self._mem_last
+        j = np.searchsorted(allc, cur)
+        hits[j] += 1
+        last[j] = t
+        alive = (t - last) <= self.MEMORY_TTL
+        self._mem_codes, self._mem_hits, self._mem_last = allc[alive], hits[alive], last[alive]
+        keep = self._mem_codes[(self._mem_hits >= self.MEMORY_MIN_HITS)]
+        merged = np.union1d(cur, keep)
+        self.remembered_only = int(len(merged) - len(cur))
+        return self._decode(merged)
 
     def _parse_pc2(self, msg):
         """

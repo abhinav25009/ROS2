@@ -25,6 +25,7 @@ CONTRACT
 """
 import heapq
 import math
+import time
 
 import numpy as np
 
@@ -48,6 +49,12 @@ class LazyThetaStar:
         self._zmid = np.array([(self.z_layers[i] + self.z_layers[i + 1]) / 2.0
                                for i in range(len(self.z_layers) - 1)])
         self.max_expansions = int(max_expansions)
+        # Wall-clock cap per plan() call, None = no cap. The portfolio sets
+        # it: on long routes in big maps the search can run 17-23 s before
+        # hitting max_expansions, and only THEN would the portfolio fall
+        # back to stock A* (2026-11-17 baseline benchmark, SC5 / F5).
+        self.time_budget_s = None
+        self.gave_up = None          # None | 'budget' | 'expansions'
         self.expansions = 0
         self.los_checks = 0
 
@@ -135,6 +142,9 @@ class LazyThetaStar:
     def plan(self, grids, start_world, goal_world):
         self.expansions = 0
         self.los_checks = 0
+        self.gave_up = None
+        deadline = (time.perf_counter() + self.time_budget_s
+                    if self.time_budget_s else None)
         grids = np.asarray(grids, dtype=bool)
         s = self.to_cell(*start_world)
         g = self.to_cell(*goal_world)
@@ -179,6 +189,11 @@ class LazyThetaStar:
             if n == g:
                 return self._trace(parent, s, g)
             if self.expansions > self.max_expansions:
+                self.gave_up = 'expansions'
+                return None
+            if (deadline is not None and not self.expansions & 1023
+                    and time.perf_counter() > deadline):
+                self.gave_up = 'budget'
                 return None
 
             pn = parent[n]

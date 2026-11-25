@@ -28,6 +28,7 @@ HOW
 """
 import heapq
 import math
+import time
 
 import numpy as np
 from edt import distance_transform_edt
@@ -47,6 +48,12 @@ class ClearanceAStar:
         self.d_safe = float(d_safe)
         self.weight = float(weight)
         self.max_expansions = int(max_expansions)
+        # Wall-clock cap per plan() call, None = no cap. The portfolio sets
+        # it: on long routes in big maps the search can run 17-23 s before
+        # hitting max_expansions, and only THEN would the portfolio fall
+        # back to stock A* (2026-11-17 baseline benchmark, SC5 / F5).
+        self.time_budget_s = None
+        self.gave_up = None          # None | 'budget' | 'expansions'
         self._zmid = np.array([(self.z_layers[i] + self.z_layers[i + 1]) / 2.0
                                for i in range(len(self.z_layers) - 1)])
         self.expansions = 0
@@ -84,6 +91,9 @@ class ClearanceAStar:
     def plan(self, grids, start_world, goal_world):
         self.expansions = 0
         self.los_checks = 0
+        self.gave_up = None
+        deadline = (time.perf_counter() + self.time_budget_s
+                    if self.time_budget_s else None)
         grids = np.asarray(grids, dtype=bool)
         cl = self.clearance(grids)
 
@@ -121,6 +131,11 @@ class ClearanceAStar:
                 out.reverse()
                 return out
             if self.expansions > self.max_expansions:
+                self.gave_up = 'expansions'
+                return None
+            if (deadline is not None and not self.expansions & 1023
+                    and time.perf_counter() > deadline):
+                self.gave_up = 'budget'
                 return None
             nw = self.to_world(n)
             for m in self._neighbours(grids, n):

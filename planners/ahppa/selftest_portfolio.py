@@ -171,5 +171,152 @@ if rows:
     check("row t is sim time", abs(float(rows[0]['t']) - 100) < 60,
           rows[0]['t'])
 
+print("\n-- member time budget --")
+# A long detour: 300 x 300 cells, a wall across with a gap at the far end.
+from lazy_theta import LazyThetaStar                     # noqa: E402
+from clearance_astar import ClearanceAStar               # noqa: E402
+import time as _time                                     # noqa: E402
+g3 = np.zeros((1, 300, 300), bool)
+g3[0, 150, :290] = True
+for cls in (LazyThetaStar, ClearanceAStar):
+    m = cls([1.8], resolution=0.1, origin_x=0.0, origin_y=0.0)
+    full = m.plan(g3, (5.0, 2.0, 1.8), (5.0, 28.0, 1.8))
+    check(f"{cls.__name__}: no budget -> path, gave_up None",
+          bool(full) and m.gave_up is None, f"{m.expansions} expansions")
+    m.time_budget_s = 1e-4
+    t0 = _time.perf_counter()
+    p = m.plan(g3, (5.0, 2.0, 1.8), (5.0, 28.0, 1.8))
+    dt = _time.perf_counter() - t0
+    check(f"{cls.__name__}: tiny budget -> None, gave_up 'budget'",
+          p is None and m.gave_up == 'budget', f"{dt * 1000:.0f} ms, {m.expansions} expansions")
+    m.time_budget_s = None
+    check(f"{cls.__name__}: budget cleared -> path again", bool(m.plan(g3, (5.0, 2.0, 1.8), (5.0, 28.0, 1.8))))
+
+check("portfolio default budget is 5 s", abs(P.MEMBER_BUDGET_S - 5.0) < 1e-9)
+with contextlib.redirect_stdout(io.StringIO()):
+    pl2 = P.PortfolioPlanner(grid, octo, safety_margin=0.25)
+check("budget installed on both members",
+      pl2._lt.time_budget_s == 5.0 and pl2._ca.time_budget_s == 5.0)
+
+
+def _over_budget(*_a, **_k):
+    pl2._lt.gave_up = 'budget'
+    return None
+
+
+pl2._lt.plan = _over_budget
+P.DISPATCH = HysteresisDispatcher()
+P.WATCHDOG.reset()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    path = pl2.plan(-3.0, 0.0, 3.0, 0.0, start_layer=1, goal_layer=1)
+check("member over budget -> stock A* path returned",
+      pl2.last_mode == OPEN and bool(path) and pl2.last_gave_up == 'budget', pl2.last_mode)
+check("console says why", 'over its 5 s budget' in buf.getvalue(), buf.getvalue().strip()[-90:])
+rows = list(csv.DictReader(open(files[0]))) if files else []
+check("log row: OPEN->A*, error 'gave up (budget)'",
+      rows and rows[-1]['planner'] == 'OPEN->A*' and rows[-1]['error'] == 'gave up (budget)',
+      str(rows[-1] if rows else ''))
+P.MEMBER_BUDGET_S = 0.0
+with contextlib.redirect_stdout(io.StringIO()):
+    pl3 = P.PortfolioPlanner(grid, octo, safety_margin=0.25)
+check("AHPPA_MEMBER_BUDGET_S=0 disables the cap", pl3._lt.time_budget_s is None)
+P.MEMBER_BUDGET_S = 5.0
+
+print("\n-- race (AHPPA_RACE) --")
+PARENT = os.getpid()
+real_stock = P.MultiLayerPlanner.plan
+
+
+def no_zombies():
+    try:
+        return os.waitpid(-1, os.WNOHANG) == (0, 0) and False
+    except ChildProcessError:
+        return True                                      # no children at all
+
+
+def race_plan(lt_delay=None, st_delay=None, lt_fail=False, st_crash=False):
+    """One race on the open map; delays/failures apply only in the children."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        pl = P.PortfolioPlanner(grid, octo, safety_margin=0.25)
+    real_lt = pl._lt.plan
+
+    def lt(*a, **k):
+        if os.getpid() != PARENT:
+            if lt_delay:
+                _time.sleep(lt_delay)
+            if lt_fail:
+                return None
+        return real_lt(*a, **k)
+
+    def st(self, *a, **k):
+        if os.getpid() != PARENT:
+            if st_crash:
+                os._exit(3)
+            if st_delay:
+                _time.sleep(st_delay)
+        return real_stock(self, *a, **k)
+    pl._lt.plan = lt
+    P.MultiLayerPlanner.plan = st
+    P.WATCHDOG.reset()
+    t0 = _time.perf_counter()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            path = pl.plan(-3.0, 0.0, 3.0, 0.0, start_layer=1, goal_layer=1)
+    finally:
+        P.MultiLayerPlanner.plan = real_stock
+    return pl, path, _time.perf_counter() - t0
+
+
+P.RACE, P.RACE_WAIT = True, 0.0
+pl, path, dt = race_plan()
+rows = list(csv.DictReader(open(files[0])))
+check("race: mode RACE, path returned", pl.last_mode == 'RACE' and bool(path), pl.last_mode)
+check("race: log row says who won, with times",
+      rows[-1]['planner'] in ('RACE:lt', 'RACE:stock') and 't_' in rows[-1]['note'],
+      f"{rows[-1]['planner']}  {rows[-1]['note']}")
+check("race: no child processes left", no_zombies())
+pl, path, dt = race_plan(lt_delay=2.0)
+check("lt slow, wait 0 -> stock wins, lt killed early",
+      rows and pl.last_race['p_stock'] and path == pl.last_race['p_stock'] and dt < 1.5,
+      f"{dt:.2f} s")
+check("  ... and the killed child is reaped", no_zombies())
+pl, path, dt = race_plan(st_delay=2.0)
+check("stock slow -> lt wins without waiting for stock",
+      path and path == pl.last_race['p_lt'] and dt < 1.5 and 't_stock' not in pl.last_race,
+      f"{dt:.2f} s")
+P.RACE_WAIT = 2.0
+pl, path, dt = race_plan(lt_delay=0.6, st_delay=0.4)
+check("wait 2: lt at ~0.6 s beats the 3 x 0.4 s deadline -> lt",
+      path == pl.last_race['p_lt'], str({k: v for k, v in pl.last_race.items() if k.startswith('t_')}))
+pl, path, dt = race_plan(lt_delay=2.5, st_delay=0.3)
+check("wait 2: lt later than 3 x stock -> stock, returned at ~0.9 s",
+      path == pl.last_race['p_stock'] and dt < 1.6, f"{dt:.2f} s")
+P.RACE_WAIT = 0.0
+pl, path, dt = race_plan(lt_fail=True, st_delay=0.3)
+check("lt finds nothing -> stock path", bool(path) and path == pl.last_race['p_stock'])
+pl, path, dt = race_plan(st_crash=True)
+check("stock child crashes -> lt path still used", bool(path) and path == pl.last_race['p_lt'])
+P.RACE_HARD_S = 0.5
+pl, path, dt = race_plan(lt_delay=3.0, st_delay=3.0)
+check("both children hang -> killed at RACE_HARD_S, stock run in-process",
+      bool(path) and pl.last_race['p_lt'] is None and pl.last_race['p_stock'] is None and dt < 2.5,
+      f"{dt:.2f} s")
+check("  ... nothing left running", no_zombies())
+P.RACE_HARD_S = 30.0
+P.RACE_OBSERVE = True
+pl, path, dt = race_plan(lt_delay=0.2, st_delay=0.5)
+check("observe mode times both children",
+      't_lt' in pl.last_race and 't_stock' in pl.last_race and path == pl.last_race['p_lt'],
+      str({k: v for k, v in pl.last_race.items() if k.startswith('t_')}))
+P.RACE_OBSERVE = False
+P.WATCHDOG.tripped = True
+with contextlib.redirect_stdout(io.StringIO()):
+    pl = P.PortfolioPlanner(grid, octo, safety_margin=0.25)
+    pl.plan(-3.0, 0.0, 3.0, 0.0, start_layer=1, goal_layer=1)
+check("deadlock still dispatches ESCAPE, not RACE", pl.last_mode == ESCAPE, pl.last_mode)
+P.WATCHDOG.reset()
+P.RACE = False
+
 print(f"\n  {'ALL PASS' if not FAILS else 'FAILED: ' + ', '.join(FAILS)}\n")
 sys.exit(1 if FAILS else 0)

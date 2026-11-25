@@ -50,8 +50,10 @@ class Tf360(Node):
         self.static = StaticTransformBroadcaster(self)
         self.pose = None
 
+        self.declare_parameter('world', 'house_2floor')
+        world = str(self.get_parameter('world').value)
         self.create_subscription(TFMessage,
-                                 '/world/house_2floor/dynamic_pose/info',
+                                 f'/world/{world}/dynamic_pose/info',
                                  self.on_pose, 10)
         self.create_timer(0.05, self.publish_dynamic)   # 20 Hz
 

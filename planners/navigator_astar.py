@@ -46,6 +46,7 @@ from nav_msgs.msg import OccupancyGrid, Path
 from geometry_msgs.msg import PoseStamped, PointStamped
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
+from visualization_msgs.msg import Marker, MarkerArray
 from tf2_msgs.msg import TFMessage
 from px4_msgs.msg import (
     OffboardControlMode, TrajectorySetpoint,
@@ -56,7 +57,7 @@ from px4_msgs.msg import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.octomap_3d_query import OctoMap3DQuery
 from planners.planner_3d import (MultiLayerPlanner, Z_LAYERS,
-                                 DEFAULT_LAYER, layer_for_z)
+                                 DEFAULT_LAYER, layer_for_z, DRONE_CLEARANCE)
 # [portfolio] override placed AFTER the import it shadows: an unconditional
 # `from planners.planner_3d import MultiLayerPlanner` after this would rebind
 # the name straight back to the stock class, and the log would still claim the
@@ -72,6 +73,31 @@ if _os.environ.get('AHPPA_PORTFOLIO', '0') not in ('0', '', 'false'):
     print('  [portfolio] AHPPA planner portfolio ACTIVE')
 else:
     _ahppa = None
+
+
+def densify_path(path, spacing=0.1):
+    """Insert points every `spacing` m along each segment (2D or 3D tuples).
+
+    The follower in _navigate_step / _explore_step takes the closest waypoint
+    as progress and then the first waypoint >= LOOKAHEAD_DIST away. On a
+    SPARSE path (Lazy Theta* returns 2-7 points) the closest waypoint stays
+    the start until the drone is half way, so as soon as it drifts 0.3 m out
+    the start itself becomes the target and pulls it back: it oscillates in
+    place forever. Seen in flight 2026-11-17 on the first OPEN plan. Dense
+    A* paths hid this. Densifying here keeps the any-angle geometry and gives
+    the follower and the obstacle checker the spacing they assume."""
+    if not path or len(path) < 2:
+        return path
+    out = [tuple(path[0])]
+    for a, b in zip(path, path[1:]):
+        d = math.dist(a[:2], b[:2])
+        if len(a) == 3:
+            d = max(d, abs(b[2] - a[2]))
+        n = max(1, int(math.ceil(d / spacing)))
+        for k in range(1, n + 1):
+            t = k / n
+            out.append(tuple(a[i] + t * (b[i] - a[i]) for i in range(len(a))))
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -688,6 +714,7 @@ class AutonomousNavigator(Node):
         #   --ros-args -p world:=house_3room
         self.declare_parameter('world', 'house_2floor')
         world = str(self.get_parameter('world').value)
+        self._viz_world = world
 
         # ── Subscribers ──
         self.gz_sub = self.create_subscription(
@@ -774,6 +801,18 @@ class AutonomousNavigator(Node):
 
         # Parameters
         self.ALTITUDE = 1.8          # Flight altitude (metres)
+        # Altitude to hover at in READY. Starts at ALTITUDE and follows the
+        # last goal reached, so after flying upstairs the drone stays there
+        # instead of sinking back to 1.8 m (fixed 2026-11-17).
+        self.hold_alt = self.ALTITUDE
+        # Crash response (2026-11-17 flight: flipped against the atrium railing
+        # at 380 s and tumbled with motors on for 45 s while this node kept
+        # sending setpoints and replanning). Tilt above CRASH_TILT_DEG for
+        # CRASH_HOLD_S of sim time -> force-disarm and stop commanding.
+        self.tilt_deg = 0.0
+        self.CRASH_TILT_DEG = 60.0
+        self.CRASH_HOLD_S = 0.25
+        self._tilt_since = None
         self.WP_REACH_DIST = 0.25    # Slightly more forgiving (was 0.15)
         self.SCAN_WP_REACH = 0.5     # Distance to consider scan position reached
         self.YAW_STEP = 0.03         # Slower rotation = better scan quality (was 0.04)
@@ -797,8 +836,22 @@ class AutonomousNavigator(Node):
             print(f"  [portfolio] clock: "
                   f"{'sim' if self._uses_sim_time() else 'WALL (use_sim_time is false)'}")
 
+        # ── AHPPA v3: fast "commanded forward, not moving" trigger ──
+        self._stuck_hist = []         # (t, x, y, z) since the current path was set
+        self._stuck_wps = None        # the waypoint list the history belongs to
+        self._tilt_hist = []          # (t, tilt_deg, x, y, z), last IMPACT_HIST_S
+        self._recover = None          # dict(target ENU, until) while backing off
+
         # ── Control timer: 20 Hz ──
         self.create_timer(0.05, self.control_loop)
+
+        # ── Demo overlay (AHPPA_VIZ=1): drone, trail, unseen obstacles and the
+        #    contact memory as RViz markers. Display only: nothing here feeds
+        #    back into planning or control. ──
+        self._viz_kind, self._viz_trail = None, []
+        if os.environ.get('AHPPA_VIZ', '0') == '1':
+            self.viz_pub = self.create_publisher(MarkerArray, '/ahppa/viz', 10)
+            self.create_timer(0.2, self._viz_tick)
 
         print("\n╔══════════════════════════════════════════════════════════╗")
         print("║   🧠 AUTONOMOUS NAVIGATOR v6 — SAFE FRONTIER EXPLORER  ║")
@@ -826,6 +879,11 @@ class AutonomousNavigator(Node):
 
     def odom_cb(self, msg):
         self.px4_pos = np.array([msg.position[0], msg.position[1], msg.position[2]])
+        w, x, y, z = (float(v) for v in msg.q)
+        if not math.isnan(w):
+            # angle between the body z axis and the world vertical
+            c = max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))
+            self.tilt_deg = math.degrees(math.acos(c))
 
     def map_cb(self, msg):
         """Store the latest projected OccupancyGrid from OctoMap and update planner cache."""
@@ -888,13 +946,17 @@ class AutonomousNavigator(Node):
                 if g_layer is not None:
                     print(f"   start layer {s_layer} (z={Z_LAYERS[s_layer]:.1f}) "
                           f"-> goal layer {g_layer} (z={Z_LAYERS[g_layer]:.1f})")
-                path = planner.plan(self.gz_pos[0], self.gz_pos[1], gx, gy,
-                                    start_layer=s_layer, goal_layer=g_layer)
+                path = self._plan_layers(planner, self.gz_pos[0], self.gz_pos[1], s_layer,
+                                         gx, gy, g_layer)
+                self._viz_kind = getattr(planner, 'last_memory', None)
             except Exception as e:
                 print(f"   ⚠️  2.5D planner failed ({e}), falling back to 2D...")
                 path = None
 
-        if path is None:
+        if path is None and not self._fallback_ok(g_layer):
+            print("   ❌ No 2.5D path, and the 2D fallback is refused above the ground floor. "
+                  "Hovering.")
+        elif path is None:
             print(f"   Planning with 2D A* (fallback)...")
             planner_2d = SensorMapPlanner(self.occupancy_grid, safety_margin=self.SAFETY_MARGIN, unknown_penalty=50.0)
             path_2d = planner_2d.plan(self.gz_pos[0], self.gz_pos[1], gx, gy)
@@ -903,7 +965,7 @@ class AutonomousNavigator(Node):
                 path = [(x, y, self.ALTITUDE) for x, y in path_2d]
 
         if path:
-            self.waypoints = path
+            self.waypoints = densify_path(path)
             self.wp_idx = 0
             self.goal_xy = (gx, gy)
             self.goal_layer = g_layer if self.octomap_3d.is_ready else None
@@ -940,9 +1002,34 @@ class AutonomousNavigator(Node):
         msg.data = new_state
         self.nav_state_pub.publish(msg)
 
+    def _check_crash(self):
+        """True (and the vehicle killed) once tilt stays past the limit."""
+        if self.state in ('INIT', 'CRASHED'):
+            return self.state == 'CRASHED'
+        if self.tilt_deg < self.CRASH_TILT_DEG:
+            self._tilt_since = None
+            return False
+        now = self._now()
+        if self._tilt_since is None:
+            self._tilt_since = now
+            return False
+        if now - self._tilt_since < self.CRASH_HOLD_S:
+            return False
+        print(f"\n  💥 CRASH: tilt {self.tilt_deg:.0f}° for {now - self._tilt_since:.2f} s "
+              f"- force-disarming, no further setpoints or replans.")
+        # MAV_CMD_COMPONENT_ARM_DISARM, param1 = 0 (disarm), param2 = 21196 (force)
+        self._send_command(400, param1=0.0, param2=21196.0)
+        self.waypoints = []
+        self.goal_xy = None
+        self.goal_layer = None
+        self._set_state('CRASHED')
+        return True
+
     def control_loop(self):
         if self.px4_pos is None or self.gz_pos is None:
             return
+        if self._check_crash():
+            return            # CRASHED: no heartbeat, no setpoints, no replans
 
         if self.state == 'INIT':
             self._takeoff()
@@ -956,11 +1043,21 @@ class AutonomousNavigator(Node):
 
         elif self.state == 'NAVIGATING':
             if _ahppa is not None:
+                if self._recovering():
+                    return                 # backing off after an impact
+                if self._impact():
+                    return
                 _ahppa.observe(*self.gz_pos, goal_active=True)
                 if _ahppa.deadlock_edge():
                     print(f"  🔒 [portfolio] DEADLOCK: moved < "
                           f"{_ahppa.WATCHDOG.min_disp:.2f} m in "
                           f"{_ahppa.WATCHDOG.window_s:.1f} s — replanning in ESCAPE")
+                    h = self._stuck_heading()
+                    if h is not None and self.gz_pos[2] >= self.STUCK_MIN_Z:
+                        _ahppa.report_stuck(self.gz_pos[0], self.gz_pos[1], *h, source='watchdog')
+                    self._replan()
+                    return
+                if self._fast_stuck():
                     self._replan()
                     return
             self._navigate_step()
@@ -968,8 +1065,8 @@ class AutonomousNavigator(Node):
         elif self.state == 'READY':
             if _ahppa is not None:
                 _ahppa.observe(*self.gz_pos, goal_active=False)
-            # Hover in place
-            self._send_position(self.px4_pos[0], self.px4_pos[1], -self.ALTITUDE)
+            # Hover in place, at the altitude of the last goal reached
+            self._send_position(self.px4_pos[0], self.px4_pos[1], -self.hold_alt)
 
     # ── Exploration Phase ─────────────────────────────────────────────────────
 
@@ -1061,7 +1158,7 @@ class AutonomousNavigator(Node):
                     path = None
 
             if path:
-                self.frontier_path = path
+                self.frontier_path = densify_path(path)
                 self.frontier_wp_idx = 1  # Skip the start point
                 self.frontier_phase = 'FLYING'
                 self._publish_rviz_path(path)
@@ -1280,6 +1377,242 @@ class AutonomousNavigator(Node):
 
     # ── Navigation Phase ──────────────────────────────────────────────────────
 
+    def _plan_layers(self, planner, sx, sy, sl, gx, gy, gl):
+        """Plan, doing any change of floor as a vertical leg in a clear column.
+
+        Climbing: rise at the start, then fly level at the goal altitude.
+        Descending: fly level at the current altitude, then drop at the goal.
+        Either way the horizontal leg is flown at the HIGHER of the two
+        altitudes, so the drone never crosses a railing, sill or atrium edge
+        at railing height when it does not have to. On 2026-11-17 the layered
+        planner put the climb near the goal and crossed the atrium railing at
+        3.6 m (railing top 4.05 m) - into posts that had dropped out of the
+        map. Falls back to the planner's own transitions when the column is
+        not clear or the planner had to move the start/goal."""
+        if getattr(self, 'viz_pub', None) is not None:
+            self._viz_stock_path(planner, sx, sy, sl, gx, gy, gl)
+        if gl is None or gl == sl:
+            return planner.plan(sx, sy, gx, gy, start_layer=sl, goal_layer=gl)
+        z0, z1 = Z_LAYERS[sl], Z_LAYERS[gl]
+        lo, hi = min(z0, z1) - DRONE_CLEARANCE, max(z0, z1) + DRONE_CLEARANCE
+        try:
+            if gl > sl and self.octomap_3d.is_column_clear(sx, sy, lo, hi, xy_radius=0.4):
+                leg = planner.plan(sx, sy, gx, gy, start_layer=gl, goal_layer=gl)
+                if leg and math.hypot(leg[0][0] - sx, leg[0][1] - sy) < 0.25:
+                    print(f"   climb first: {z0:.1f} -> {z1:.1f} m at the start, then level")
+                    return [(sx, sy, z0)] + [tuple(p) for p in leg]
+            elif gl < sl and self.octomap_3d.is_column_clear(gx, gy, lo, hi, xy_radius=0.4):
+                leg = planner.plan(sx, sy, gx, gy, start_layer=sl, goal_layer=sl)
+                if leg and math.hypot(leg[-1][0] - gx, leg[-1][1] - gy) < 0.25:
+                    print(f"   descend last: level at {z0:.1f} m, then {z0:.1f} -> {z1:.1f} m at the goal")
+                    return [tuple(p) for p in leg] + [(gx, gy, z1)]
+        except Exception as e:
+            print(f"   (vertical-leg planning failed: {e}; using layered transitions)")
+        return planner.plan(sx, sy, gx, gy, start_layer=sl, goal_layer=gl)
+
+    def _fallback_ok(self, goal_layer):
+        """The 2D fallback plans at ALTITUDE (1.8 m) on the PROJECTED map, which
+        flattens both floors. Upstairs it would fly into the slab (420.9 s,
+        2026-11-17), so it is only allowed on the ground floor."""
+        on_ground_floor = self.gz_pos is not None and self.gz_pos[2] < 2.6
+        goal_down = goal_layer is None or Z_LAYERS[goal_layer] < 2.8
+        return on_ground_floor and goal_down
+
+    def _at_goal(self):
+        """At the goal: within WP_REACH_DIST horizontally and 0.3 m vertically,
+        and progress is within the last 0.3 m of the (densified) path.
+        Requiring progress == LAST waypoint failed on a vertical descent:
+        hovering 7 cm above the goal (normal PX4 settling) the closest point
+        is the one 0.1 m above it, so the goal was never declared and the
+        deadlock watchdog fired instead (re-fly, 2026-11-17, 210-214 s)."""
+        if not self.waypoints:
+            return False
+        if self.wp_idx < len(self.waypoints) - 4:
+            return False
+        g = self.waypoints[-1]
+        d = math.hypot(g[0] - self.gz_pos[0], g[1] - self.gz_pos[1])
+        dz = abs(g[2] - self.gz_pos[2]) if len(g) == 3 else 0.0
+        return d < self.WP_REACH_DIST and dz < 0.3
+
+    def _wp_dist(self, wp):
+        """Distance from the drone to a waypoint: 3D for (x, y, z) waypoints.
+        Horizontal-only distance made a goal straight above the drone count as
+        reached at once, and made every point of a vertical climb tie as
+        'closest', so progress and lookahead never advanced up the climb."""
+        if len(wp) == 3:
+            return math.dist(wp, self.gz_pos[:3])
+        return math.hypot(wp[0] - self.gz_pos[0], wp[1] - self.gz_pos[1])
+
+    FAST_STUCK_S = 1.5       # v3: commanded forward but moved less than
+    FAST_STUCK_M = 0.10      # FAST_STUCK_M (3D) in FAST_STUCK_S of sim time
+    STUCK_MIN_Z = 0.5        # v3: no stuck barrier below this altitude (on the ground)
+
+    IMPACT_TILT_DEG = 10.0   # v3: tilt past this ...
+    CALM_TILT_DEG = 5.0      # ... after IMPACT_CALM_S below this = a bump
+    IMPACT_CALM_S = 1.0
+    IMPACT_HIST_S = 1.5
+    RECOVER_BACK_M = 0.6     # back off this far, along the surface normal
+    RECOVER_MIN_S = 2.0      # and hold at least this long, until level again
+    RECOVER_STEADY_S = 1.0   # "level again" = tilt < CALM, speed < RECOVER_MAX_SPEED
+    RECOVER_MAX_SPEED = 0.2  #   and at the hold altitude, for RECOVER_STEADY_S
+    RECOVER_MAX_S = 10.0     # replan anyway after this long
+
+    def _impact(self):
+        """AHPPA v3: a sudden tilt while cruising is a collision with
+        something the map does not hold. Glass flight test (glass_test.sdf,
+        2026-11-19): at 0.3 m/s the tilt went 0.3 -> 18.7 deg in 0.1 s on
+        contact, normal cruise stayed below 3.4 deg; the drone survived the
+        first bump and crashed on the second, after replanning the same way.
+        So on the FIRST bump: remember a barrier where it hit, back off, level
+        out, then replan in ESCAPE. Returns True when it fired."""
+        if not getattr(_ahppa, 'V3', False) or self.gz_pos is None:
+            return False
+        now = self._now()
+        x, y, z = (float(v) for v in self.gz_pos[:3])
+        self._tilt_hist.append((now, float(self.tilt_deg), x, y, z))
+        while self._tilt_hist and now - self._tilt_hist[0][0] > self.IMPACT_HIST_S:
+            self._tilt_hist.pop(0)
+        if self.tilt_deg < self.IMPACT_TILT_DEG:
+            return False
+        calm = [h for h in self._tilt_hist if now - self.IMPACT_CALM_S - 0.3 <= h[0] <= now - 0.3]
+        if not calm or calm[0][0] > now - self.IMPACT_CALM_S or max(h[1] for h in calm) >= self.CALM_TILT_DEG:
+            return False                    # not after calm flight: not a fresh bump
+        pre = calm[-1]                      # last calm pose, ~0.3 s before
+        old = calm[0]
+        hx, hy = pre[2] - old[2], pre[3] - old[3]
+        if math.hypot(hx, hy) < 0.05:       # was hovering: use the path direction
+            h = self._stuck_heading()
+            if h is None:
+                return False
+            hx, hy = h
+        n = math.hypot(hx, hy)
+        print(f"  💢 [v3] IMPACT: tilt {pre[1]:.1f} -> {self.tilt_deg:.1f}° near "
+              f"({pre[2]:.2f}, {pre[3]:.2f}) moving ({hx / n:+.2f}, {hy / n:+.2f}) — "
+              f"something the map does not hold")
+        # phase 1 (BOUNCE_S): do not fight the bounce - hold wherever the
+        # drone is - and measure which way it is thrown: that is the surface
+        # normal. Glass flight 3: grazing the pane while flying ALONG it, the
+        # heading was +y but the bounce went mostly -x, away from the glass;
+        # backing off opposite the heading kept it scraping and it flipped.
+        self._recover = dict(phase='bounce', t0=now, until=now + self.BOUNCE_S,
+                             pre=pre, heading=(hx / n, hy / n),
+                             start=(x, y), target=(x, y, pre[4]))
+        self._tilt_hist = []
+        self._recovering()
+        return True
+
+    BOUNCE_S = 0.3           # v3: watch the bounce this long to find the surface normal
+
+    def _bounce_done(self, r, now):
+        """End of the bounce phase: barrier across the HEADING, back off
+        opposite it. (Taking the bounce direction as the surface normal was
+        tried and was 36-45 deg off in two glass flights: the post-impact
+        swing dominates it. Every first contact in the flights was head-on,
+        where the heading is exact.)"""
+        pre, (hx, hy) = r['pre'], r['heading']
+        nx, ny = -hx, -hy
+        b = math.hypot(self.gz_pos[0] - r['start'][0], self.gz_pos[1] - r['start'][1])
+        print(f"  [v3] bounced {b:.2f} m; barrier across the heading, backing off "
+              f"{self.RECOVER_BACK_M:.1f} m")
+        _ahppa.report_stuck(pre[2], pre[3], -nx, -ny, source='impact')
+        r.update(phase='back', until=now + self.RECOVER_MIN_S,
+                 target=(pre[2] + nx * self.RECOVER_BACK_M, pre[3] + ny * self.RECOVER_BACK_M, pre[4]))
+
+    def _recovering(self):
+        """After an impact: bounce phase, then hold the back-off point; once
+        RECOVER_MIN_S has passed and the drone is level, replan (ESCAPE, with
+        the new barrier). Returns True while recovery is in progress."""
+        r = self._recover
+        if r is None:
+            return False
+        now = self._now()
+        if r['phase'] == 'bounce':
+            if now < r['until']:
+                self._send_position(self.px4_pos[0], self.px4_pos[1], -r['target'][2],
+                                    yaw=self.current_yaw)
+                return True
+            self._bounce_done(r, now)
+        tx, ty, tz = r['target']
+        # "level" must HOLD: in the first glass flight the tilt passed through
+        # 5 deg for one tick mid-oscillation (18 -> 5.3 -> 28 deg) and the
+        # replan started while the drone was still swinging
+        prev = r.get('prev')
+        speed = (math.dist(prev[1:], self.gz_pos[:3]) / max(1e-3, now - prev[0])) if prev else 9.9
+        r['prev'] = (now, float(self.gz_pos[0]), float(self.gz_pos[1]), float(self.gz_pos[2]))
+        steady = (self.tilt_deg < self.CALM_TILT_DEG and speed < self.RECOVER_MAX_SPEED
+                  and abs(self.gz_pos[2] - tz) < 0.3)
+        r['steady_since'] = (r.get('steady_since') or now) if steady else None
+        held = r['steady_since'] is not None and now - r['steady_since'] >= self.RECOVER_STEADY_S
+        if now >= r['until'] and (held or now - r['t0'] >= self.RECOVER_MAX_S):
+            self._recover = None
+            print(f"  [v3] {'steady again' if held else 'recovery timed out'} after "
+                  f"{now - r['t0']:.1f} s — replanning around the remembered barrier")
+            self._replan()
+            return True
+        dx, dy = tx - self.gz_pos[0], ty - self.gz_pos[1]
+        d = math.hypot(dx, dy)
+        if d > self.MAX_NAV_DELTA:                 # same clamp as the follower
+            dx, dy = dx * self.MAX_NAV_DELTA / d, dy * self.MAX_NAV_DELTA / d
+        # hold the CURRENT yaw: the default yaw=0 would add a turn to north
+        # on top of the upset (glass flight 2, 2026-11-19)
+        self._send_position(self.px4_pos[0] + dy, self.px4_pos[1] + dx, -tz, yaw=self.current_yaw)
+        return True
+
+    def _stuck_heading(self):
+        """Direction the follower is trying to go: toward the first waypoint
+        at least 0.3 m ahead (the pure-pursuit target). None at the end."""
+        if not self.waypoints or self.gz_pos is None:
+            return None
+        # start from the CLOSEST waypoint, as _navigate_step does: wp_idx can
+        # lag behind the drone (right after a replan it is 0), and a target
+        # behind the drone would put the barrier on the wrong side
+        hi = min(len(self.waypoints), self.wp_idx + 20)
+        k = min(range(self.wp_idx, hi), key=lambda i: self._wp_dist(self.waypoints[i]), default=self.wp_idx)
+        for wp in self.waypoints[k:]:
+            dx, dy = wp[0] - self.gz_pos[0], wp[1] - self.gz_pos[1]
+            if math.hypot(dx, dy) >= 0.3:
+                return dx, dy
+        return None
+
+    def _fast_stuck(self):
+        """AHPPA v3: True (once, then the history restarts) when the drone has
+        been COMMANDED along a path for FAST_STUCK_S but moved less than
+        FAST_STUCK_M. Unlike the 6 s watchdog this cannot fire while the
+        drone hovers to plan (the history restarts with every new path) or
+        settles at the goal (not checked within 0.5 m of the last waypoint).
+        Pressed against an obstacle the map does not hold (glass, thin posts),
+        every planner would keep sending it into the same spot; reporting it
+        writes a barrier into the planner's stuck memory."""
+        if _ahppa is None or not getattr(_ahppa, 'V3', False) or not self.waypoints:
+            return False
+        if self._stuck_wps is not self.waypoints:            # new path: restart
+            self._stuck_wps, self._stuck_hist = self.waypoints, []
+        if self.gz_pos[2] < self.STUCK_MIN_Z:                # on the ground (landed, or
+            self._stuck_hist = []                            # knocked down): not a blockage
+            return False
+        g = self.waypoints[-1]
+        if math.hypot(g[0] - self.gz_pos[0], g[1] - self.gz_pos[1]) < 0.5:
+            self._stuck_hist = []
+            return False
+        h = self._stuck_heading()
+        if h is None:
+            return False
+        now = self._now()
+        self._stuck_hist.append((now, float(self.gz_pos[0]), float(self.gz_pos[1]), float(self.gz_pos[2])))
+        while self._stuck_hist and now - self._stuck_hist[0][0] > self.FAST_STUCK_S:
+            self._stuck_hist.pop(0)
+        if now - self._stuck_hist[0][0] < self.FAST_STUCK_S - 0.1:
+            return False                                     # window not full yet
+        a, b = self._stuck_hist[0], self._stuck_hist[-1]
+        moved = math.dist(a[1:], b[1:])
+        span = max(math.dist(p[1:], a[1:]) for p in self._stuck_hist)
+        if span >= self.FAST_STUCK_M:
+            return False
+        print(f"  🧱 [v3] commanded toward a waypoint {math.hypot(*h):.2f} m ahead but moved "
+              f"{moved:.2f} m in {b[0] - a[0]:.1f} s — stuck on something the map does not hold")
+        self._stuck_hist = []
+        return _ahppa.report_stuck(self.gz_pos[0], self.gz_pos[1], *h, source='fast')
+
     def _navigate_step(self):
         """Follow path waypoints to the goal with velocity + altitude clamping."""
 
@@ -1288,23 +1621,23 @@ class AutonomousNavigator(Node):
         best_idx = self.wp_idx
         for i in range(self.wp_idx, min(len(self.waypoints), self.wp_idx + 20)):
             wp = self.waypoints[i]
-            d = math.hypot(wp[0] - self.gz_pos[0], wp[1] - self.gz_pos[1])
+            d = self._wp_dist(wp)
             if d < min_d:
                 min_d = d
                 best_idx = i
         self.wp_idx = best_idx
 
         # Check if we reached the final destination
-        if self.wp_idx >= len(self.waypoints) - 1:
+        if self._at_goal():
             final_wp = self.waypoints[-1]
-            d_final = math.hypot(final_wp[0] - self.gz_pos[0], final_wp[1] - self.gz_pos[1])
-            if d_final < self.WP_REACH_DIST:
-                print("  🎉 DESTINATION REACHED! Set a new goal in RViz.")
-                self.waypoints = []
-                self.goal_xy = None
-                self.goal_layer = None
-                self._set_state('READY')
-                return
+            if len(final_wp) == 3:
+                self.hold_alt = float(final_wp[2])
+            print(f"  🎉 DESTINATION REACHED at z={self.gz_pos[2]:.2f} m! Set a new goal in RViz.")
+            self.waypoints = []
+            self.goal_xy = None
+            self.goal_layer = None
+            self._set_state('READY')
+            return
 
         # Obstacle avoidance: periodically check if path is still clear
         self.avoidance_tick += 1
@@ -1321,7 +1654,7 @@ class AutonomousNavigator(Node):
         target_wp = self.waypoints[self.wp_idx]
         for i in range(self.wp_idx, len(self.waypoints)):
             wp = self.waypoints[i]
-            d = math.hypot(wp[0] - self.gz_pos[0], wp[1] - self.gz_pos[1])
+            d = self._wp_dist(wp)
             target_wp = wp
             if d >= LOOKAHEAD_DIST:
                 break
@@ -1367,10 +1700,15 @@ class AutonomousNavigator(Node):
             alt_str = f", alt={wz:.1f}m" if len(target_wp) == 3 else ""
             print(f"  📍 WP {self.wp_idx}/{len(self.waypoints)} — {dist:.2f}m{alt_str}")
 
+    PATH_CHECK_HORIZON_M = 5.0    # how far ahead the segment check looks
+    PATH_CHECK_STEP_M = 0.10      # sample spacing along each segment
+
     def _path_blocked(self):
-        """Check if upcoming waypoints collide with latest OctoMap (3D-aware)."""
+        """Check if the path ahead collides with latest OctoMap (3D-aware)."""
         if self.occupancy_grid is None:
             return False
+        if self.octomap_3d.is_ready and self._segments_blocked():
+            return True
 
         # Check next 5 waypoints
         check_end = min(self.wp_idx + 5, len(self.waypoints))
@@ -1401,13 +1739,47 @@ class AutonomousNavigator(Node):
                             return True
         return False
 
+    def _segments_blocked(self):
+        """Sample the STRAIGHT SEGMENTS from the drone through the upcoming
+        waypoints, up to PATH_CHECK_HORIZON_M ahead.
+
+        The waypoint check below only looks at the next 5 waypoints. On the
+        dense stock A* path that is ~0.5 m ahead; on an any-angle or smoothed
+        path (AHPPA v2, Lazy Theta*) waypoints can be metres apart, and a
+        wall the map learns about BETWEEN two waypoints was never checked -
+        the drone would fly the segment into it. Found by the mission
+        simulator (benchmark/mission_sim.py), 2026-11-19."""
+        if self.gz_pos is None or not self.waypoints:
+            return False
+        prev = (float(self.gz_pos[0]), float(self.gz_pos[1]), float(self.gz_pos[2]))
+        acc = 0.0
+        for wp in self.waypoints[self.wp_idx:]:
+            cur = (wp[0], wp[1], wp[2] if len(wp) == 3 else self.ALTITUDE)
+            d = math.dist(prev, cur)
+            n = max(1, int(math.ceil(d / self.PATH_CHECK_STEP_M)))
+            for k in range(1, n + 1):
+                f = k / n
+                x = prev[0] + (cur[0] - prev[0]) * f
+                y = prev[1] + (cur[1] - prev[1]) * f
+                z = prev[2] + (cur[2] - prev[2]) * f
+                if not self.octomap_3d.is_column_clear(x, y, z - 0.3, z + 0.3, xy_radius=0.3):
+                    return True
+                if acc + d * f > self.PATH_CHECK_HORIZON_M:
+                    return False
+            acc += d
+            prev = cur
+        return False
+
     def _replan(self):
         """Replan from current position to stored goal (3D-aware)."""
         if self.goal_xy is None or self.occupancy_grid is None:
             return
 
-        # Hover while replanning
-        self._send_position(self.px4_pos[0], self.px4_pos[1], -self.current_alt)
+        # Hover while replanning. Keep the current yaw: the default yaw=0 made
+        # PX4 turn the drone toward north for the whole planning time
+        # (found in the glass flights, 2026-11-19).
+        self._send_position(self.px4_pos[0], self.px4_pos[1], -self.current_alt,
+                            yaw=self.current_yaw)
 
         path = None
         # Try 2.5D replan first
@@ -1416,15 +1788,17 @@ class AutonomousNavigator(Node):
                 planner = MultiLayerPlanner(self.occupancy_grid, self.octomap_3d,
                                             safety_margin=self.SAFETY_MARGIN, unknown_penalty=50.0)
                 # Use standard A* (dense path) instead of Theta* (sparse path)
-                path = planner.plan(self.gz_pos[0], self.gz_pos[1],
-                                    self.goal_xy[0], self.goal_xy[1],
-                                    start_layer=layer_for_z(self.gz_pos[2]),
-                                    goal_layer=self.goal_layer)
+                path = self._plan_layers(planner, self.gz_pos[0], self.gz_pos[1],
+                                         layer_for_z(self.gz_pos[2]),
+                                         self.goal_xy[0], self.goal_xy[1], self.goal_layer)
+                self._viz_kind = getattr(planner, 'last_memory', None)
             except Exception:
                 path = None
 
-        # Fallback to 2D
-        if path is None:
+        # Fallback to 2D - ground floor only
+        if path is None and not self._fallback_ok(self.goal_layer):
+            print("  ❌ Replan: no 2.5D path; 2D fallback refused above the ground floor.")
+        elif path is None:
             planner_2d = SensorMapPlanner(self.occupancy_grid, safety_margin=self.SAFETY_MARGIN, unknown_penalty=50.0)
             path_2d = planner_2d.plan(self.gz_pos[0], self.gz_pos[1],
                                       self.goal_xy[0], self.goal_xy[1])
@@ -1432,7 +1806,7 @@ class AutonomousNavigator(Node):
                 path = [(x, y, self.ALTITUDE) for x, y in path_2d]
 
         if path:
-            self.waypoints = path
+            self.waypoints = densify_path(path)
             self.wp_idx = 0
             self._publish_rviz_path(path)
             print(f"  ✅ Replanned — {len(path)} waypoints. Resuming!")
@@ -1516,8 +1890,110 @@ class AutonomousNavigator(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.command_pub.publish(msg)
 
+    # Unseen obstacles per world, for the demo overlay only: (cx, cy, cz, sx, sy, sz, label)
+    VIZ_GHOSTS = {'glass_test': [(4.0, 0.85, 1.4, 0.05, 7.3, 2.8,
+                                  'glass pane: invisible to the depth cameras')]}
+    VIZ_KIND_RGB = {'bar': (1.0, 0.35, 0.1), 'hull': (1.0, 0.8, 0.1), 'dot': (0.9, 0.2, 0.9)}
+
+    def _viz_stock_path(self, planner, sx, sy, sl, gx, gy, gl):
+        """Demo overlay only: plan the same request with the STOCK layered A*
+        (the planner AHPPA replaces) and publish it, so RViz can show both."""
+        import contextlib, io
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                sp = MultiLayerPlanner.plan(planner, sx, sy, gx, gy, start_layer=sl, goal_layer=gl)
+        except Exception:
+            sp = None
+        self._viz_stock = [tuple(p) for p in sp] if sp else None
+        if not hasattr(self, 'stock_pub'):
+            self.stock_pub = self.create_publisher(Path, '/ahppa/stock_path', 10)
+        msg = Path()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        for wp in (self._viz_stock or []):
+            ps = PoseStamped()
+            ps.header = msg.header
+            ps.pose.position.x, ps.pose.position.y = float(wp[0]), float(wp[1])
+            ps.pose.position.z = float(wp[2]) if len(wp) == 3 else self.ALTITUDE
+            msg.poses.append(ps)
+        self.stock_pub.publish(msg)
+
+    def _viz_tick(self):
+        if self.gz_pos is None:
+            return
+        now = self.get_clock().now().to_msg()
+        ms = []
+
+        def mk(ns, i, typ, rgba, scale):
+            m = Marker()
+            m.header.frame_id, m.header.stamp = 'map', now
+            m.ns, m.id, m.type, m.action = ns, i, typ, Marker.ADD
+            m.pose.orientation.w = 1.0
+            m.color.r, m.color.g, m.color.b, m.color.a = (float(v) for v in rgba)
+            m.scale.x, m.scale.y, m.scale.z = (float(v) for v in scale)
+            ms.append(m)
+            return m
+
+        def pt(x, y, z):
+            q = PointStamped().point
+            q.x, q.y, q.z = float(x), float(y), float(z)
+            return q
+
+        x, y, z = (float(v) for v in self.gz_pos[:3])
+        d = mk('drone', 0, Marker.SPHERE, (0.1, 0.9, 0.3, 1.0), (0.45, 0.45, 0.2))
+        d.pose.position = pt(x, y, z)
+        if not self._viz_trail or math.dist(self._viz_trail[-1], (x, y, z)) > 0.05:
+            self._viz_trail.append((x, y, z))
+        if len(self._viz_trail) > 1:
+            t = mk('trail', 0, Marker.LINE_STRIP, (0.1, 0.9, 0.3, 0.8), (0.04, 0, 0))
+            t.points = [pt(*p) for p in self._viz_trail[-3000:]]
+
+        for i, (cx, cy, cz, sx, sy, sz, lab) in enumerate(self.VIZ_GHOSTS.get(self._viz_world, [])):
+            g = mk('unseen obstacle', i, Marker.CUBE, (0.35, 0.75, 1.0, 0.25), (sx, sy, sz))
+            g.pose.position = pt(cx, cy, cz)
+            tx = mk('unseen obstacle label', i, Marker.TEXT_VIEW_FACING, (0.6, 0.85, 1.0, 1.0), (0, 0, 0.3))
+            tx.pose.position, tx.text = pt(cx, cy + sy / 2 - 0.8, cz + sz / 2 + 0.35), lab
+
+        mem = list(getattr(_ahppa, 'MEMORY', [])) if _ahppa is not None else []
+        kind = self._viz_kind if self._viz_kind in self.VIZ_KIND_RGB else 'bar'
+        if mem:
+            r, g_, b = self.VIZ_KIND_RGB[kind]
+            for i, (x0, y0, x1, y1) in enumerate(_ahppa.memory_segments(mem, kind)):
+                L = math.hypot(x1 - x0, y1 - y0)
+                w = mk('contact memory', i, Marker.CUBE, (r, g_, b, 0.55), (max(L, 0.1), 0.12, 2.4))
+                w.pose.position = pt((x0 + x1) / 2, (y0 + y1) / 2, 1.3)
+                a = math.atan2(y1 - y0, x1 - x0)
+                w.pose.orientation.z, w.pose.orientation.w = math.sin(a / 2), math.cos(a / 2)
+            c = mk('contacts', 0, Marker.SPHERE_LIST, (1.0, 0.15, 0.15, 1.0), (0.22, 0.22, 0.22))
+            bd = getattr(_ahppa, 'BAR_D', 0.3)
+            c.points = [pt(m_['cx'] - m_['hx'] * bd, m_['cy'] - m_['hy'] * bd, 1.8) for m_ in mem]
+        # clear barrier slots no longer used (fusion merges barriers)
+        for i in range(len([m_ for m_ in ms if m_.ns == 'contact memory']), 30):
+            m = Marker()
+            m.header.frame_id, m.header.stamp, m.ns, m.id, m.action = 'map', now, 'contact memory', i, Marker.DELETE
+            ms.append(m)
+
+        def plen(P_):
+            return sum(math.dist(P_[i][:2], P_[i + 1][:2]) for i in range(len(P_) - 1)) if P_ and len(P_) > 1 else 0.0
+        sp, ap = getattr(self, '_viz_stock', None), getattr(self, '_viz_ahppa', None)
+        if sp and ap:
+            cm = mk('comparison', 0, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 1.0, 1.0), (0, 0, 0.32))
+            cm.pose.position = pt(x, y, z + 1.4)
+            cm.text = (f"stock A*: {plen(sp):.1f} m, {len(sp)} waypoints   |   "
+                       f"AHPPA: {plen(ap):.1f} m, {len(ap)} waypoints")
+        v = ('v2 (no contact memory)' if not getattr(_ahppa, 'V3', False)
+             else 'v3.1 (fusion)' if getattr(_ahppa, 'FUSE', False) else 'v3')
+        st = mk('status', 0, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 1.0, 1.0), (0, 0, 0.35))
+        st.pose.position = pt(x, y, z + 0.8)
+        st.text = (f"AHPPA {v} | contacts remembered: {len(mem)}"
+                   + (f" | memory level: {kind}" if mem else ""))
+        arr = MarkerArray()
+        arr.markers = ms
+        self.viz_pub.publish(arr)
+
     def _publish_rviz_path(self, coords):
         """Draw the planned path as a line in RViz (supports 2D and 3D coords)."""
+        self._viz_ahppa = [tuple(c) for c in coords]
         msg = Path()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
