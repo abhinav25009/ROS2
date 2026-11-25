@@ -1,0 +1,22 @@
+@page { size: A4; margin: 16mm 14mm 16mm 14mm; }
+body { font-family: "Times New Roman", Times, serif; font-size: 10pt; line-height: 1.32; color: #111; background: #fff; max-width: none; margin: 0; }
+header#title-block-header { column-span: all; text-align: center; margin-bottom: 10pt; }
+h1.title { font-size: 17pt; margin: 0 0 4pt; line-height: 1.2; }
+p.subtitle { color: #b00; font-size: 9pt; letter-spacing: .05em; margin: 0 0 4pt; }
+p.author, p.date { margin: 2pt 0; font-size: 10pt; }
+div.abstract { text-align: justify; font-size: 9pt; margin: 8pt 6% 4pt; }
+div.abstract-title { font-weight: bold; font-style: italic; text-align: center; }
+main, body > :not(header) { }
+.cols { column-count: 2; column-gap: 7mm; text-align: justify; hyphens: auto; }
+h1 { font-size: 11pt; font-variant: small-caps; margin: 10pt 0 4pt; break-after: avoid; }
+h2 { font-size: 10pt; font-style: italic; font-weight: normal; margin: 8pt 0 3pt; break-after: avoid; }
+p { margin: 0 0 5pt; }
+figure { column-span: all; margin: 6pt 0 8pt; break-inside: avoid; text-align: center; }
+figure img { max-width: 100%; }
+figcaption { font-size: 8.5pt; text-align: justify; margin-top: 3pt; }
+table { border-collapse: collapse; font-size: 8pt; margin: 4pt auto 8pt; break-inside: avoid; }
+th, td { border-top: 0.5pt solid #999; border-bottom: 0.5pt solid #999; padding: 2pt 4pt; }
+caption { caption-side: bottom; font-size: 8.5pt; text-align: justify; padding-top: 3pt; }
+code { font-size: 8.5pt; }
+.references, #refs { font-size: 8.5pt; }
+ul, ol { padding-left: 14pt; margin: 0 0 5pt; }

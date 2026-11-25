@@ -32,3 +32,6 @@ IMPLEMENTATION_PLAN.md
 
 # Backup copies (*.bak, *.bak2, *.bak-2floor, ...)
 *.bak*
+
+# macOS metadata
+._*
