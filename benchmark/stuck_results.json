@@ -1,0 +1,943 @@
+{
+ "scenarios": [
+  "railing",
+  "visible",
+  "glass",
+  "netting",
+  "glass_corr",
+  "post_door",
+  "zigzag"
+ ],
+ "planners": [
+  "stock",
+  "ps",
+  "lt",
+  "ahppa",
+  "v2",
+  "v3",
+  "v3f"
+ ],
+ "table": {
+  "railing|stock": {
+   "n": 30,
+   "success": 1.0,
+   "time": 36.53,
+   "contact": 12.05,
+   "contact_mean": 14.5,
+   "trips": 0.8666666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "railing|ps": {
+   "n": 30,
+   "success": 1.0,
+   "time": 38.61,
+   "contact": 14.5,
+   "contact_mean": 14.703333333333335,
+   "trips": 0.8666666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "railing|lt": {
+   "n": 30,
+   "success": 1.0,
+   "time": 38.61,
+   "contact": 13.399999999999999,
+   "contact_mean": 15.116666666666667,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "railing|ahppa": {
+   "n": 30,
+   "success": 1.0,
+   "time": 35.685,
+   "contact": 12.2,
+   "contact_mean": 11.8,
+   "trips": 0.5666666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "railing|v2": {
+   "n": 30,
+   "success": 1.0,
+   "time": 36.83,
+   "contact": 13.7,
+   "contact_mean": 14.003333333333332,
+   "trips": 0.7666666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "railing|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 34.120000000000005,
+   "contact": 11.5,
+   "contact_mean": 11.273333333333333,
+   "trips": 0.7666666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "railing|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 28.04,
+   "contact": 4.55,
+   "contact_mean": 4.473333333333334,
+   "trips": 2.7333333333333334,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|stock": {
+   "n": 30,
+   "success": 1.0,
+   "time": 13.435,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|ps": {
+   "n": 30,
+   "success": 1.0,
+   "time": 12.925,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|lt": {
+   "n": 30,
+   "success": 1.0,
+   "time": 13.895,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|ahppa": {
+   "n": 30,
+   "success": 1.0,
+   "time": 13.885000000000002,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|v2": {
+   "n": 30,
+   "success": 1.0,
+   "time": 12.92,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 12.905000000000001,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "visible|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 12.905000000000001,
+   "contact": 0.0,
+   "contact_mean": 0.0,
+   "trips": 0.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|stock": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 111.94999999999999,
+   "contact_mean": 111.27666666666667,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|ps": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 112.25,
+   "contact_mean": 111.48333333333335,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|lt": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 112.25,
+   "contact_mean": 111.51,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|ahppa": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 112.2,
+   "contact_mean": 111.43000000000002,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|v2": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 112.25,
+   "contact_mean": 111.47666666666667,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 54.675,
+   "contact": 27.95,
+   "contact_mean": 28.783333333333328,
+   "trips": 5.166666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 32.775000000000006,
+   "contact": 7.8,
+   "contact_mean": 7.373333333333332,
+   "trips": 5.466666666666667,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|stock": {
+   "n": 30,
+   "success": 1.0,
+   "time": 25.53,
+   "contact": 8.35,
+   "contact_mean": 10.35,
+   "trips": 0.7333333333333333,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|ps": {
+   "n": 30,
+   "success": 1.0,
+   "time": 25.04,
+   "contact": 8.4,
+   "contact_mean": 10.333333333333334,
+   "trips": 0.7,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|lt": {
+   "n": 30,
+   "success": 1.0,
+   "time": 25.25,
+   "contact": 8.4,
+   "contact_mean": 10.34,
+   "trips": 0.7333333333333333,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|ahppa": {
+   "n": 30,
+   "success": 1.0,
+   "time": 26.67,
+   "contact": 8.35,
+   "contact_mean": 10.309999999999999,
+   "trips": 0.7333333333333333,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|v2": {
+   "n": 30,
+   "success": 1.0,
+   "time": 25.18,
+   "contact": 8.4,
+   "contact_mean": 10.333333333333334,
+   "trips": 0.7,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 22.125,
+   "contact": 5.55,
+   "contact_mean": 4.343333333333334,
+   "trips": 0.7,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "netting|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 17.765,
+   "contact": 1.3,
+   "contact_mean": 1.1099999999999999,
+   "trips": 0.8,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|stock": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 117.8,
+   "contact_mean": 118.22333333333331,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|ps": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 117.85,
+   "contact_mean": 118.31666666666666,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|lt": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 117.9,
+   "contact_mean": 118.33666666666667,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|ahppa": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 117.8,
+   "contact_mean": 118.27,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|v2": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 117.8,
+   "contact_mean": 118.30999999999999,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 42.92,
+   "contact": 11.1,
+   "contact_mean": 12.520000000000003,
+   "trips": 2.2666666666666666,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "glass_corr|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 33.894999999999996,
+   "contact": 2.7,
+   "contact_mean": 3.0366666666666666,
+   "trips": 2.2666666666666666,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|stock": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 104.94999999999999,
+   "contact_mean": 105.26666666666665,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|ps": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 104.94999999999999,
+   "contact_mean": 105.22333333333331,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|lt": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 104.94999999999999,
+   "contact_mean": 105.22666666666665,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|ahppa": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 104.94999999999999,
+   "contact_mean": 105.18666666666665,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|v2": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 104.94999999999999,
+   "contact_mean": 105.21999999999998,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 27.104999999999997,
+   "contact": 5.6,
+   "contact_mean": 5.603333333333331,
+   "trips": 1.0,
+   "shrinks": 30,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "post_door|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 22.025,
+   "contact": 1.3,
+   "contact_mean": 1.3466666666666662,
+   "trips": 1.0,
+   "shrinks": 30,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|stock": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 126.05,
+   "contact_mean": 126.55999999999999,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|ps": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 126.6,
+   "contact_mean": 127.01,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|lt": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 126.69999999999999,
+   "contact_mean": 127.1,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|ahppa": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 126.25,
+   "contact_mean": 126.90000000000003,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|v2": {
+   "n": 30,
+   "success": 0.0,
+   "time": NaN,
+   "contact": 126.6,
+   "contact_mean": 127.01666666666667,
+   "trips": 1.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 0,
+    "timeout": 30,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|v3": {
+   "n": 30,
+   "success": 1.0,
+   "time": 87.965,
+   "contact": 50.0,
+   "contact_mean": 47.60333333333333,
+   "trips": 8.533333333333333,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  },
+  "zigzag|v3f": {
+   "n": 30,
+   "success": 1.0,
+   "time": 40.515,
+   "contact": 10.7,
+   "contact_mean": 10.666666666666668,
+   "trips": 8.0,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 30,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   }
+  }
+ },
+ "overall": {
+  "stock": {
+   "n": 180,
+   "success": 0.3333333333333333,
+   "time": 31.515,
+   "contact": 108.05,
+   "contact_mean": 81.02944444444447,
+   "trips": 0.9333333333333333,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 60,
+    "timeout": 120,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 14585.300000000012
+  },
+  "ps": {
+   "n": 180,
+   "success": 0.3333333333333333,
+   "time": 32.32,
+   "contact": 107.95,
+   "contact_mean": 81.17833333333333,
+   "trips": 0.9277777777777778,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 60,
+    "timeout": 120,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 14612.100000000006
+  },
+  "lt": {
+   "n": 180,
+   "success": 0.3333333333333333,
+   "time": 31.6,
+   "contact": 107.95,
+   "contact_mean": 81.27166666666666,
+   "trips": 0.9555555555555556,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 60,
+    "timeout": 120,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 14628.9
+  },
+  "ahppa": {
+   "n": 180,
+   "success": 0.3333333333333333,
+   "time": 32.32,
+   "contact": 107.9,
+   "contact_mean": 80.64944444444443,
+   "trips": 0.8833333333333333,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 60,
+    "timeout": 120,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 14516.9
+  },
+  "v2": {
+   "n": 180,
+   "success": 0.3333333333333333,
+   "time": 31.884999999999998,
+   "contact": 107.95,
+   "contact_mean": 81.05999999999999,
+   "trips": 0.9111111111111111,
+   "shrinks": 0,
+   "outcomes": {
+    "success": 60,
+    "timeout": 120,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 14590.800000000003
+  },
+  "v3": {
+   "n": 180,
+   "success": 1.0,
+   "time": 40.535,
+   "contact": 11.1,
+   "contact_mean": 18.354444444444443,
+   "trips": 3.0722222222222224,
+   "shrinks": 30,
+   "outcomes": {
+    "success": 180,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 3303.7999999999965
+  },
+  "v3f": {
+   "n": 180,
+   "success": 1.0,
+   "time": 30.405,
+   "contact": 3.9,
+   "contact_mean": 4.667777777777777,
+   "trips": 3.3777777777777778,
+   "shrinks": 30,
+   "outcomes": {
+    "success": 180,
+    "timeout": 0,
+    "collision": 0,
+    "no_path": 0
+   },
+   "contact_total": 840.2000000000003
+  }
+ },
+ "tests": {
+  "v3_vs_v2": {
+   "n": 180,
+   "time_a": 7987.37,
+   "time_b": 16280.289999999999,
+   "p_time": 4.846849271153656e-29,
+   "contact_a": 3303.7999999999997,
+   "contact_b": 14590.800000000001,
+   "p_contact": 8.789578009838527e-28,
+   "a_faster": 0.9222222222222223
+  },
+  "v3f_vs_v2": {
+   "n": 180,
+   "time_a": 5205.799999999999,
+   "time_b": 16280.289999999999,
+   "p_time": 4.6679955515208515e-31,
+   "contact_a": 840.2,
+   "contact_b": 14590.800000000001,
+   "p_contact": 2.801879317112281e-30,
+   "a_faster": 0.9666666666666667
+  },
+  "v3f_vs_v3": {
+   "n": 180,
+   "time_a": 5205.799999999999,
+   "time_b": 7987.37,
+   "p_time": 1.0198727089871138e-30,
+   "contact_a": 840.2,
+   "contact_b": 3303.7999999999997,
+   "p_contact": 2.7119242344511567e-30,
+   "a_faster": 0.95
+  },
+  "v3f_vs_stock": {
+   "n": 180,
+   "time_a": 5205.799999999999,
+   "time_b": 16301.829999999998,
+   "p_time": 1.1265742572013615e-30,
+   "contact_a": 840.2,
+   "contact_b": 14585.300000000001,
+   "p_contact": 2.463087412811622e-30,
+   "a_faster": 0.9833333333333333
+  },
+  "v3f_vs_lt": {
+   "n": 180,
+   "time_a": 5205.799999999999,
+   "time_b": 16334.31,
+   "p_time": 3.9506445599981155e-31,
+   "contact_a": 840.2,
+   "contact_b": 14628.9,
+   "p_contact": 1.8706530598419195e-30,
+   "a_faster": 0.9833333333333333
+  },
+  "v2_vs_ahppa": {
+   "n": 180,
+   "time_a": 16280.289999999999,
+   "time_b": 16305.48,
+   "p_time": 0.0006920600266722342,
+   "contact_a": 14590.800000000001,
+   "contact_b": 14516.9,
+   "p_contact": 2.4202387238104633e-06,
+   "a_faster": 0.5666666666666667
+  },
+  "visible_v3f_vs_v2": {
+   "n": 30,
+   "time_a": 391.01,
+   "time_b": 391.47,
+   "p_time": 0.7486398473205851,
+   "contact_a": 0.0,
+   "contact_b": 0.0,
+   "p_contact": 1.0,
+   "a_faster": 0.36666666666666664
+  }
+ }
+}
